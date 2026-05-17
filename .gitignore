@@ -65,3 +65,6 @@ yarn-error.log*
 *.coreml
 *.mlpackage
 *.mlmodelc
+
+# Per-session local notes (kept out of public repo)
+NEXT_SESSION.md
