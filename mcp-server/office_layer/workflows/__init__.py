@@ -6,6 +6,7 @@ the start. Phase 2 fills the rest.
 """
 
 from .client_history import build_client_history
+from .contract_diff import compare_contracts, compare_sections
 from .contract_sections import (
     extract_contract_sections,
     extract_sections_from_text,
@@ -20,4 +21,6 @@ __all__ = [
     "build_client_history",
     "extract_contract_sections",
     "extract_sections_from_text",
+    "compare_contracts",
+    "compare_sections",
 ]

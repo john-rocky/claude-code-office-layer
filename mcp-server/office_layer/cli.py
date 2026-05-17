@@ -20,6 +20,7 @@ from .models import SearchQuery, WorkspacePolicy
 from .safety import classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
+    compare_contracts as _compare_contracts,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
 )
@@ -463,6 +464,97 @@ def contract_sections(
         trunc = "[yellow]yes[/yellow]" if sec["body_truncated"] else ""
         t.add_row(str(sec["ordinal"]), sec["heading"], str(sec["body_char_count"]), trunc)
     console.print(t)
+
+
+def _resolve_doc_id_or_die(reference: str) -> str:
+    """Resolve a CLI argument as either a ``doc_xxx`` id or a filesystem
+    path. Exits with code 1 if neither matches an indexed document."""
+    engine = get_engine()
+    doc = engine.storage.get_document(reference)
+    if doc is None:
+        p = Path(reference).expanduser().resolve()
+        for ws in engine.workspaces.list():
+            doc = engine.storage.get_document_by_path(ws.id, str(p))
+            if doc:
+                break
+    if doc is None:
+        console.print(f"[red]Document not found[/red]: {reference}")
+        sys.exit(1)
+    return doc.id
+
+
+_DIFF_STATUS_STYLE = {
+    "identical": "green",
+    "wording": "cyan",
+    "substantive": "red",
+    "added": "yellow",
+    "removed": "yellow",
+}
+
+
+@contract.command("diff")
+@click.argument("doc_a")
+@click.argument("doc_b")
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def contract_diff(doc_a: str, doc_b: str, json_output: bool) -> None:
+    """Compare two indexed contracts clause-by-clause.
+
+    Each argument is either a ``doc_xxx`` id or the file path of an
+    already-indexed document. Status legend: identical / wording /
+    substantive / added / removed.
+    """
+    a_id = _resolve_doc_id_or_die(doc_a)
+    b_id = _resolve_doc_id_or_die(doc_b)
+    result = _compare_contracts(a_id, b_id)
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    summary = result["summary"]
+    console.print(
+        f"[bold]{result['doc_a']['name']}[/bold]  vs  "
+        f"[bold]{result['doc_b']['name']}[/bold]\n"
+        f"sections: A={result['section_count_a']}  B={result['section_count_b']}\n"
+        f"identical={summary['identical']}  wording={summary['wording']}  "
+        f"substantive={summary['substantive']}  added={summary['added']}  "
+        f"removed={summary['removed']}"
+    )
+    if not result["pairs"]:
+        console.print("[yellow]No clauses to compare.[/yellow]")
+        return
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("A#", justify="right")
+    t.add_column("B#", justify="right")
+    t.add_column("Title")
+    t.add_column("Status")
+    t.add_column("Edit", justify="right")
+    for pair in result["pairs"]:
+        status = pair["status"]
+        style = _DIFF_STATUS_STYLE.get(status, "white")
+        title = pair["title_b"] or pair["title_a"] or ""
+        ratio = pair["edit_ratio"]
+        ratio_str = "" if ratio is None else f"{ratio:.2f}"
+        t.add_row(
+            "" if pair["ordinal_a"] is None else str(pair["ordinal_a"]),
+            "" if pair["ordinal_b"] is None else str(pair["ordinal_b"]),
+            title,
+            f"[{style}]{status}[/{style}]",
+            ratio_str,
+        )
+    console.print(t)
+    # Show diff hunks for substantive changes inline so the user does not
+    # have to drop into --json-output to see what actually changed.
+    for pair in result["pairs"]:
+        if pair["status"] not in {"substantive", "wording"}:
+            continue
+        if not pair["diff_hunks"]:
+            continue
+        heading = pair["heading_b"] or pair["heading_a"]
+        console.rule(f"[bold]{heading}  [{pair['status']}]")
+        for hunk in pair["diff_hunks"]:
+            console.print(hunk)
 
 
 @main.command("risk")

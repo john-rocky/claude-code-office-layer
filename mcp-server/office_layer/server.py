@@ -23,6 +23,7 @@ from .models import (
 from .safety import AuditLogger, classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
+    compare_contracts as _compare_contracts,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
 )
@@ -528,6 +529,47 @@ def extract_contract_sections(
             "persisted": bool(persist),
         },
     )
+    return result
+
+
+@mcp.tool()
+def compare_contracts(doc_a: str, doc_b: str) -> dict:
+    """Diff two indexed contract documents clause-by-clause.
+
+    ``doc_a`` / ``doc_b`` are each either a ``doc_xxx`` id or the file
+    path of an already-indexed document. Returns a list of ``pairs``
+    (one per matched clause + unmatched leftovers) and a ``summary``
+    counter of ``identical / wording / substantive / added / removed``.
+    Pairing prefers ordinal match (`第N条` lines up across versions); the
+    fallback is greedy title edit-distance. Status thresholds: identical
+    = byte-equal after whitespace strip, wording = char-edit ratio < 0.10,
+    substantive = ≥0.10. Each non-identical pair carries unified-diff
+    hunks for the clause body. Nothing is persisted — the diff is a
+    one-shot comparison artifact.
+    """
+    a_id = _resolve_document_id(doc_a)
+    if a_id is None:
+        return {"error": f"document not found (path or id): {doc_a}"}
+    b_id = _resolve_document_id(doc_b)
+    if b_id is None:
+        return {"error": f"document not found (path or id): {doc_b}"}
+    result = _compare_contracts(a_id, b_id)
+    if "error" not in result:
+        _audit().record(
+            "compare_contracts",
+            tool="compare_contracts",
+            referenced_files=[
+                result.get("doc_a", {}).get("path", doc_a),
+                result.get("doc_b", {}).get("path", doc_b),
+            ],
+            extra={
+                "doc_a_id": a_id,
+                "doc_b_id": b_id,
+                "section_count_a": result.get("section_count_a", 0),
+                "section_count_b": result.get("section_count_b", 0),
+                "summary": result.get("summary", {}),
+            },
+        )
     return result
 
 
