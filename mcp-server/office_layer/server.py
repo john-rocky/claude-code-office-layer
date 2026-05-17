@@ -21,7 +21,10 @@ from .models import (
     WorkspacePolicy,
 )
 from .safety import AuditLogger, classify_operation
-from .workflows import extract_invoice_fields as _extract_invoice_fields
+from .workflows import (
+    build_client_history as _build_client_history,
+    extract_invoice_fields as _extract_invoice_fields,
+)
 
 log = logging.getLogger(__name__)
 
@@ -443,6 +446,50 @@ def extract_invoice_fields(document: str, *, persist: bool = True) -> dict:
             "field_count": result.get("field_count", 0),
             "avg_confidence": result.get("avg_confidence", 0.0),
             "persisted": bool(persist),
+        },
+    )
+    return result
+
+
+@mcp.tool()
+def build_client_history(
+    client_name: str,
+    *,
+    workspace_ids: list[str] | None = None,
+    aliases: list[str] | None = None,
+    timeline_limit: int = 50,
+    evidence_max_sources: int = 5,
+) -> dict:
+    """Aggregate one client's documents across indexed workspaces.
+
+    Returns invoice / contract / email / note counts, total invoiced amount
+    grouped by currency, a chronological timeline of all hits, and a trimmed
+    Evidence Packet ready for the next workflow step (draft follow-up email,
+    compare contracts, etc.).
+
+    ``client_name`` is any of: company name (``"ACME 株式会社"``), short stem
+    (``"ACME"``), email domain (``"acme.co.jp"``), or contact email. The
+    extractor strips corporate suffixes and expands the input into search
+    variants internally; pass extra spelling variants via ``aliases`` if the
+    client uses a project codename or katakana spelling the heuristic would
+    not find.
+    """
+    result = _build_client_history(
+        client_name,
+        workspace_ids=workspace_ids,
+        aliases=aliases,
+        timeline_limit=timeline_limit,
+        evidence_max_sources=evidence_max_sources,
+    )
+    _audit().record(
+        "build_client_history",
+        tool="build_client_history",
+        extra={
+            "client": client_name,
+            "document_count": result.get("document_count", 0),
+            "invoice_count": result.get("invoice_count", 0),
+            "contract_count": result.get("contract_count", 0),
+            "workspace_ids": result.get("workspace_ids", []),
         },
     )
     return result

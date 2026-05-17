@@ -18,7 +18,10 @@ from .engine import get_engine
 from .engine.evidence import EvidencePacketBuilder
 from .models import SearchQuery, WorkspacePolicy
 from .safety import classify_operation
-from .workflows import extract_invoice_fields as _extract_invoice_fields
+from .workflows import (
+    build_client_history as _build_client_history,
+    extract_invoice_fields as _extract_invoice_fields,
+)
 
 console = Console()
 
@@ -343,6 +346,72 @@ def invoice_extract(document: str, no_persist: bool, json_output: bool) -> None:
         console.print(
             f"[yellow]Low-confidence keys to review:[/yellow] {', '.join(result['low_confidence_keys'])}"
         )
+
+
+@main.group()
+def client() -> None:
+    """Client-centric workflows (Phase 2)."""
+
+
+@client.command("history")
+@click.argument("client_name")
+@click.option(
+    "--workspace-id",
+    "workspace_ids",
+    multiple=True,
+    help="Restrict to one or more workspace ids. Default: all indexed workspaces.",
+)
+@click.option(
+    "--alias",
+    "aliases",
+    multiple=True,
+    help="Extra spelling variant the heuristic would miss (codename, katakana, …).",
+)
+@click.option("--timeline-limit", type=int, default=50, show_default=True)
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def client_history(
+    client_name: str,
+    workspace_ids: tuple[str, ...],
+    aliases: tuple[str, ...],
+    timeline_limit: int,
+    json_output: bool,
+) -> None:
+    """Aggregate one client's invoices / contracts / emails / notes."""
+    result = _build_client_history(
+        client_name,
+        workspace_ids=list(workspace_ids) or None,
+        aliases=list(aliases) or None,
+        timeline_limit=timeline_limit,
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    totals = result.get("total_invoiced_amount", {})
+    totals_str = (
+        ", ".join(f"{cur} {amount:,.2f}" for cur, amount in totals.items()) or "—"
+    )
+    console.print(
+        f"[bold]{result['client']}[/bold]  "
+        f"[dim]aliases: {', '.join(result['aliases_used'])}[/dim]\n"
+        f"docs={result['document_count']}  "
+        f"invoice={result['invoice_count']}  contract={result['contract_count']}  "
+        f"email={result['email_count']}  note={result['note_count']}\n"
+        f"total invoiced: {totals_str}"
+    )
+    if not result["timeline"]:
+        console.print("[yellow]No documents matched this client.[/yellow]")
+        return
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("Date")
+    t.add_column("Kind")
+    t.add_column("Name")
+    t.add_column("Matched via")
+    for row in result["timeline"]:
+        t.add_row(row["date"][:10], row["kind"], row["name"], row["matched_via"])
+    console.print(t)
 
 
 @main.command("risk")
