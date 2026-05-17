@@ -11,6 +11,7 @@ from .contract_sections import (
     extract_contract_sections,
     extract_sections_from_text,
 )
+from .email_draft import build_email_draft_body, draft_email_from_evidence
 from .folder_summary import summarize_folder
 from .invoice import extract_fields_from_text, extract_invoice_fields
 from .invoices_table import (
@@ -31,4 +32,6 @@ __all__ = [
     "extract_invoices_to_table",
     "build_invoice_rows",
     "INVOICE_TABLE_COLUMNS",
+    "draft_email_from_evidence",
+    "build_email_draft_body",
 ]

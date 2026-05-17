@@ -21,6 +21,7 @@ from .safety import classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
     compare_contracts as _compare_contracts,
+    draft_email_from_evidence as _draft_email_from_evidence,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
     extract_invoices_to_table as _extract_invoices_to_table,
@@ -611,6 +612,107 @@ def contract_diff(doc_a: str, doc_b: str, json_output: bool) -> None:
         console.rule(f"[bold]{heading}  [{pair['status']}]")
         for hunk in pair["diff_hunks"]:
             console.print(hunk)
+
+
+@main.group()
+def email() -> None:
+    """Email workflows (Phase 2)."""
+
+
+@email.command("draft")
+@click.argument("workspace_id")
+@click.argument("recipient")
+@click.option(
+    "--from-search",
+    "search_query",
+    required=True,
+    help="Query passed to build_evidence_packet to ground the draft.",
+)
+@click.option("--subject", default=None, help="Email subject. Defaults to the packet intent.")
+@click.option(
+    "--intent",
+    default=None,
+    help="One-line description of what the email is for. Defaults to the packet intent.",
+)
+@click.option(
+    "--extra-context",
+    default=None,
+    help="Free-form text appended under 'Additional context'.",
+)
+@click.option(
+    "--language",
+    type=click.Choice(["auto", "ja", "en"]),
+    default="auto",
+    show_default=True,
+)
+@click.option(
+    "--max-sources",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Cap on evidence sources pulled into the packet.",
+)
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def email_draft(
+    workspace_id: str,
+    recipient: str,
+    search_query: str,
+    subject: str | None,
+    intent: str | None,
+    extra_context: str | None,
+    language: str,
+    max_sources: int,
+    json_output: bool,
+) -> None:
+    """Stage a draft reply email under <workspace>/drafts/, grounded
+    in evidence found by ``--from-search``.
+
+    The draft never leaves the ``drafts/`` folder and is never sent —
+    it is a markdown file ready for the user to review, refine, and
+    paste into their own mail client.
+    """
+    engine = get_engine()
+    ws = engine.workspaces.get(workspace_id)
+    if ws is None:
+        console.print(f"[red]Workspace not found:[/red] {workspace_id}")
+        sys.exit(1)
+    query = SearchQuery(
+        text=search_query,
+        workspace_ids=[workspace_id],
+        limit=max(max_sources * 2, 8),
+    )
+    response = engine.search.search(query)
+    packet = EvidencePacketBuilder(engine.storage).build(
+        intent=intent or subject or f"reply to {recipient}",
+        results=response,
+        max_sources=max_sources,
+    )
+    result = _draft_email_from_evidence(
+        workspace_id,
+        packet=packet.model_dump(mode="json"),
+        recipient=recipient,
+        subject=subject,
+        intent=intent,
+        extra_context=extra_context,
+        language=language,
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[bold]draft staged[/bold]  [dim]({result['language']})[/dim]\n"
+        f"path: {result['output_path']}\n"
+        f"recipient: {result['recipient']}\n"
+        f"subject: {result['subject']}\n"
+        f"citations={result['citation_count']}  "
+        f"checklist_items={result['checklist_item_count']}  "
+        f"sources_in_packet={result['packet_source_count']}"
+    )
+    console.rule("[bold]Preview")
+    console.print(result["body_markdown"])
 
 
 @main.command("risk")

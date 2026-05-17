@@ -24,6 +24,7 @@ from .safety import AuditLogger, classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
     compare_contracts as _compare_contracts,
+    draft_email_from_evidence as _draft_email_from_evidence,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
     extract_invoices_to_table as _extract_invoices_to_table,
@@ -567,6 +568,55 @@ def extract_invoices_to_table(
             "skipped_count": result.get("skipped_count", 0),
             "low_confidence_count": result.get("low_confidence_count", 0),
             "ran_extractor": bool(run_extractor),
+            "error": result.get("error"),
+        },
+    )
+    return result
+
+
+@mcp.tool()
+def draft_email_from_evidence(
+    workspace_id: str,
+    *,
+    packet: dict,
+    recipient: str,
+    subject: str | None = None,
+    intent: str | None = None,
+    extra_context: str | None = None,
+    language: str = "auto",
+) -> dict:
+    """Stage an evidence-grounded reply email under ``<workspace>/drafts/``.
+
+    ``packet`` is the dict returned by ``build_evidence_packet`` or
+    ``build_client_history`` — pass it through unchanged. The body is a
+    skeleton with citations + a "before sending" checklist; the parent
+    agent (Claude) is expected to rewrite the prose grounded in the
+    same packet. Writes a timestamped ``.md`` file under the workspace
+    ``drafts/`` directory and refuses to leave that directory. Read-
+    only workspaces refuse the operation outright. ``language="auto"``
+    detects Japanese vs English from the packet content.
+    """
+    result = _draft_email_from_evidence(
+        workspace_id,
+        packet=packet,
+        recipient=recipient,
+        subject=subject,
+        intent=intent,
+        extra_context=extra_context,
+        language=language,
+    )
+    _audit().record(
+        "draft_email_from_evidence",
+        tool="draft_email_from_evidence",
+        output_files=[result["output_path"]] if result.get("output_path") else [],
+        extra={
+            "workspace_id": workspace_id,
+            "recipient": recipient,
+            "draft_id": result.get("draft_id"),
+            "packet_id": result.get("packet_id"),
+            "citation_count": result.get("citation_count", 0),
+            "checklist_item_count": result.get("checklist_item_count", 0),
+            "language": result.get("language"),
             "error": result.get("error"),
         },
     )
