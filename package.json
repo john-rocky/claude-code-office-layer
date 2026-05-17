@@ -1,0 +1,33 @@
+{
+  "name": "@john-rocky/claude-code-office-layer",
+  "version": "0.1.0",
+  "description": "Local Office Evidence Layer for Claude Code — Plugin + management CLI.",
+  "type": "module",
+  "bin": {
+    "office-layer-install": "./cli/install.mjs"
+  },
+  "scripts": {
+    "install:plugin": "node ./cli/install.mjs",
+    "uninstall:plugin": "node ./cli/uninstall.mjs",
+    "doctor": "node ./cli/doctor.mjs"
+  },
+  "files": [
+    "plugin/**",
+    "cli/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "mcp",
+    "office",
+    "evidence",
+    "rag"
+  ],
+  "license": "MIT",
+  "author": "john-rocky"
+}

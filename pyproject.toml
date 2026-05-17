@@ -1,0 +1,130 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-code-office-layer"
+version = "0.1.0"
+description = "Local Office Evidence Layer for Claude Code — turns messy PDFs/Office docs into grounded, actionable context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "john-rocky" }]
+keywords = ["claude-code", "mcp", "office", "rag", "evidence", "pdf"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business",
+]
+
+# Core deps — kept deliberately small so install stays light on cheap PCs.
+# All listed packages are MIT / BSD / Apache 2.0 (no AGPL contagion).
+# Heavy / ML / OCR / vector backends are gated behind `[project.optional-dependencies]`.
+dependencies = [
+    "mcp>=1.2.0",
+    "pydantic>=2.6",
+    "watchdog>=4.0",
+    "click>=8.1",
+    "rich>=13.7",
+    "platformdirs>=4.2",
+    # Lightweight Office extraction (no ML, no JVM).
+    "pdfplumber>=0.11",       # PDF text + tables, MIT, pure-python
+    "python-docx>=1.1",       # DOCX, MIT
+    "openpyxl>=3.1",          # XLSX, MIT
+    "python-pptx>=1.0",       # PPTX, MIT
+    "beautifulsoup4>=4.12",   # HTML, MIT
+    "lxml>=5.0",              # XML, MIT
+    "chardet>=5.2",           # encoding detection, LGPL but exempted as wheel
+]
+
+[project.optional-dependencies]
+# Faster PDF text. BSD/Apache. Drop-in for pdfplumber when speed matters.
+pdf-fast = ["pypdfium2>=4.30"]
+
+# PyMuPDF — AGPL or commercial. Opt-in only, never required.
+pdf-mupdf = ["pymupdf>=1.24"]
+
+# Apache Tika — broad coverage, needs JVM.
+tika = ["tika>=2.6"]
+
+# Docling — IBM, MIT, ~2GB ML model on first use. Heavy.
+docling = ["docling>=2.0"]
+
+# OCR via Tesseract. Needs `tesseract` binary on PATH.
+ocr = [
+    "pytesseract>=0.3",
+    "Pillow>=10.0",
+    "pdf2image>=1.17",
+]
+
+# OCRmyPDF: full PDF-OCR pipeline (subprocess wrapper).
+ocrmypdf = ["ocrmypdf>=16.0"]
+
+# Vector / semantic search — pick one.
+vec-sqlite = ["sqlite-vec>=0.1"]
+vec-lancedb = ["lancedb>=0.10"]
+vec-chroma = ["chromadb>=0.5"]
+
+# Embedding model. Heavy (PyTorch). Opt-in only.
+embeddings = ["sentence-transformers>=3.0"]
+
+# Email parsing.
+email = ["mail-parser>=4.1"]
+
+# Named entity extraction (Japanese / multilingual).
+entities = ["spacy>=3.7"]
+
+# macOS-only: Apple Vision OCR via pyobjc.
+macos = [
+    "pyobjc-framework-Vision>=10.0;sys_platform=='darwin'",
+    "pyobjc-framework-Quartz>=10.0;sys_platform=='darwin'",
+]
+
+# Convenience: everything except heavy ML.
+recommended = [
+    "claude-code-office-layer[pdf-fast,ocr,vec-sqlite,email,macos]",
+]
+
+# Everything, including heavy ML.
+all = [
+    "claude-code-office-layer[pdf-fast,ocr,ocrmypdf,vec-lancedb,embeddings,email,entities,macos]",
+]
+
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+office-layer = "office_layer.cli:main"
+office-layer-mcp = "office_layer.server:run"
+
+[project.urls]
+Homepage = "https://github.com/john-rocky/claude-code-office-layer"
+Issues = "https://github.com/john-rocky/claude-code-office-layer/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp-server/office_layer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["mcp-server/office_layer", "README.md", "LICENSE"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

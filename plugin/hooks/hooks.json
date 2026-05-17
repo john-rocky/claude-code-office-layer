@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.claude.com/claude-code/hooks.schema.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|Bash",
+        "command": "office-layer risk write --target {tool_input.file_path} --workspace ${OFFICE_LAYER_DEFAULT_WORKSPACE}",
+        "description": "Run the safety classifier before any local write. High-risk writes block."
+      }
+    ]
+  },
+  "_note": "Hook scripts shown here are illustrative — the runtime requires the `office-layer` CLI on PATH and the default-workspace env var to be set. Disable individual hooks by deleting them."
+}

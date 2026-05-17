@@ -1,0 +1,10 @@
+{
+  "name": "office-layer",
+  "displayName": "Claude Code Office Layer",
+  "description": "Local Office Evidence Layer — turn messy PDFs / Office docs / scans into grounded context Claude Code can act on.",
+  "version": "0.1.0",
+  "homepage": "https://github.com/john-rocky/claude-code-office-layer",
+  "author": "john-rocky",
+  "license": "MIT",
+  "tags": ["office", "evidence", "rag", "pdf", "local-first"]
+}

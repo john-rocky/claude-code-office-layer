@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "office-layer": {
+      "command": "office-layer-mcp",
+      "args": [],
+      "env": {
+        "OFFICE_LAYER_PDF": "",
+        "OFFICE_LAYER_OCR": ""
+      },
+      "description": "Local Office Evidence Layer. Run `pip install claude-code-office-layer` to install the server binary."
+    }
+  }
+}
