@@ -136,6 +136,33 @@ def update_workspace_policy(workspace_id: str, policy: str) -> dict:
 
 
 @mcp.tool()
+def set_workspace_vector_search(workspace_id: str, enabled: bool) -> dict:
+    """Toggle semantic (vector) search on a workspace.
+
+    Returns an info note if the embedder + sqlite-vec backend is not loaded —
+    in that case the flag is stored but no vectors get indexed. Re-index the
+    workspace (``start_indexing(..., force=true)``) after switching on.
+    """
+    engine = get_engine()
+    ws = engine.workspaces.set_vector_search(workspace_id, bool(enabled))
+    if ws is None:
+        return {"error": f"workspace '{workspace_id}' not found"}
+    _audit().record(
+        "set_workspace_vector_search",
+        tool="set_workspace_vector_search",
+        extra={"workspace_id": workspace_id, "enabled": bool(enabled)},
+    )
+    out = ws.model_dump(mode="json")
+    out["semantic_backend_ready"] = engine.semantic.is_available()
+    if enabled and not engine.semantic.is_available():
+        out["note"] = (
+            "Flag stored, but no embedder + sqlite-vec backend is loaded. "
+            "Install with `pip install 'claude-code-office-layer[vec-sqlite]' fastembed`."
+        )
+    return out
+
+
+@mcp.tool()
 def get_workspace_status(workspace_id: str) -> dict:
     """Return indexing status and document count for a workspace."""
     return _workspace_or_error(workspace_id)
@@ -225,6 +252,8 @@ def get_index_status() -> dict:
             "text": [a.name for a in registry.text],
             "ocr": registry.ocr.name if registry.ocr else None,
             "semantic_search": registry.semantic_search.name if registry.semantic_search else None,
+            "embedder": engine.embedder.name,
+            "semantic_ready": engine.semantic.is_available(),
             "file_watcher": registry.file_watcher.name if registry.file_watcher else None,
         },
         "degraded": [

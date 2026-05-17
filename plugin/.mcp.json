@@ -5,7 +5,9 @@
       "args": [],
       "env": {
         "OFFICE_LAYER_PDF": "",
-        "OFFICE_LAYER_OCR": ""
+        "OFFICE_LAYER_OCR": "",
+        "OFFICE_LAYER_EMBEDDER": "",
+        "OFFICE_LAYER_EMBED_MODEL": ""
       },
       "description": "Local Office Evidence Layer. Run `pip install claude-code-office-layer` to install the server binary."
     }

@@ -33,8 +33,14 @@ from ..models import (
 )
 from ..storage import Storage
 from .query_understanding import parse as parse_query
+from .semantic import SemanticIndex
 
 log = logging.getLogger(__name__)
+
+# Reciprocal-rank-fusion constant. The classic paper uses 60; smaller values
+# give the top ranks of each input list more sway, larger values flatten the
+# fused list. 60 is a fine default — change only if A/B numbers say so.
+RRF_K = 60
 
 
 # Query terms that imply a specific DocumentKind preference.
@@ -75,9 +81,15 @@ def _sanitize_fts(text: str) -> str:
 
 
 class HybridSearcher:
-    def __init__(self, storage: Storage, registry: AdapterRegistry):
+    def __init__(
+        self,
+        storage: Storage,
+        registry: AdapterRegistry,
+        semantic: SemanticIndex | None = None,
+    ):
         self.storage = storage
         self.registry = registry
+        self.semantic = semantic
 
     def search(self, query: SearchQuery) -> SearchResponse:
         started = time.monotonic()
@@ -89,6 +101,7 @@ class HybridSearcher:
 
         match_expr = _sanitize_fts(query.text)
         candidates: list[tuple[DocumentChunk, Document, float]] = []
+        fts_chunk_ids: list[str] = []
         if match_expr:
             candidates = self.storage.fts_search(
                 match_expr,
@@ -96,6 +109,24 @@ class HybridSearcher:
                 kinds=query.kinds,
                 limit=max(query.limit * 4, 40),
             )
+            fts_chunk_ids = [c.id for c, _, _ in candidates]
+
+        # Semantic recall: pull vector hits and fuse with FTS via RRF. Only
+        # runs when the workspace opted in (we don't pay model load otherwise)
+        # and the embedder + sqlite-vec are both available.
+        semantic_chunk_ids: list[str] = []
+        if (
+            self.semantic is not None
+            and self._semantic_eligible(query)
+            and self.semantic.is_available()
+        ):
+            sem_hits = self.semantic.query(
+                query.text,
+                workspace_ids=query.workspace_ids,
+                limit=max(query.limit * 4, 40),
+            )
+            semantic_chunk_ids = [h.chunk_id for h in sem_hits]
+            self._merge_semantic_into_candidates(candidates, sem_hits)
 
         # Entity-driven recall: catch documents whose chunks did not match
         # the FTS expression but where an indexed entity (company / email /
@@ -125,7 +156,20 @@ class HybridSearcher:
                 if any(t in d.name.lower() for t in terms):
                     candidates.append((_dummy_chunk(d), d, 999.0))
 
-        results = self._rank(query, candidates, enriched_notes=enriched.notes)
+        # RRF fusion boost — only meaningful when both recall paths fired,
+        # otherwise it just rewards top-ranked FTS hits twice.
+        if fts_chunk_ids and semantic_chunk_ids:
+            rrf_boosts = _rrf_score(fts_chunk_ids, semantic_chunk_ids)
+        else:
+            rrf_boosts = {}
+
+        results = self._rank(
+            query,
+            candidates,
+            enriched_notes=enriched.notes,
+            semantic_chunk_ids=set(semantic_chunk_ids),
+            rrf_boosts=rrf_boosts,
+        )
         elapsed_ms = (time.monotonic() - started) * 1000.0
         return SearchResponse(
             query=query,
@@ -133,6 +177,45 @@ class HybridSearcher:
             total=len(results),
             elapsed_ms=elapsed_ms,
         )
+
+    def _semantic_eligible(self, query: SearchQuery) -> bool:
+        """Semantic search is workspace-scoped and opt-in per workspace.
+
+        We require an explicit workspace_ids filter so we never run vector
+        search across a workspace that opted out. We also require at least
+        one of the queried workspaces to have ``enable_vector_search=True``,
+        matching the spec's keyword-default policy.
+        """
+        if not query.text.strip() or not query.workspace_ids:
+            return False
+        for ws_id in query.workspace_ids:
+            ws = self.storage.get_workspace(ws_id)
+            if ws is not None and ws.enable_vector_search:
+                return True
+        return False
+
+    def _merge_semantic_into_candidates(
+        self,
+        candidates: list[tuple[DocumentChunk, Document, float]],
+        sem_hits,
+    ) -> None:
+        """Add chunks that the FTS pass missed but the vector index found."""
+        seen_chunks = {c.id for c, _, _ in candidates}
+        for hit in sem_hits:
+            if hit.chunk_id in seen_chunks:
+                continue
+            chunk = self.storage.get_chunk(hit.chunk_id)
+            if chunk is None:
+                continue
+            doc = self.storage.get_document(chunk.document_id)
+            if doc is None:
+                continue
+            # Map vector distance to an FTS-comparable raw score. sqlite-vec
+            # returns L2-style distance (lower = better); _rank() flips sign,
+            # so passing distance directly puts these hits in the middle of
+            # the pack and lets per-result boosts decide.
+            candidates.append((chunk, doc, hit.distance))
+            seen_chunks.add(hit.chunk_id)
 
     def _entity_doc_ids(self, query: SearchQuery) -> list[str]:
         """Documents whose entities include any non-trivial query token."""
@@ -159,6 +242,8 @@ class HybridSearcher:
         candidates: Iterable[tuple[DocumentChunk, Document, float]],
         *,
         enriched_notes: list[str] | None = None,
+        semantic_chunk_ids: set[str] | None = None,
+        rrf_boosts: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         kind_pref = self._infer_kind_pref(query.text)
         terms = [t for t in re.split(r"\s+", query.text.lower()) if t]
@@ -166,6 +251,8 @@ class HybridSearcher:
         ranked: list[SearchResult] = []
         date_from = query.date_from
         date_to = query.date_to
+        semantic_chunk_ids = semantic_chunk_ids or set()
+        rrf_boosts = rrf_boosts or {}
         for chunk, doc, raw_score in candidates:
             # Date filter: skip documents outside the inferred window.
             doc_mtime = doc.mtime if doc.mtime.tzinfo else doc.mtime.replace(tzinfo=timezone.utc)
@@ -220,6 +307,23 @@ class HybridSearcher:
                         reasons.append(n)
                         break
 
+            # Semantic hit annotation. The vector recall step pulled this in
+            # with a distance — record that as a reason so callers can see
+            # why a chunk surfaced without keyword overlap.
+            if chunk.id in semantic_chunk_ids:
+                reasons.append("semantic")
+                if not matched:
+                    # Pure semantic hit. Give it a baseline floor so it
+                    # doesn't fall below well-scored keyword junk.
+                    score = max(score, 1.0)
+
+            # Reciprocal-rank-fusion bonus for chunks that ranked in both
+            # the keyword and vector lists — strong signal of relevance.
+            rrf = rrf_boosts.get(chunk.id, 0.0)
+            if rrf > 0:
+                score += rrf
+                reasons.append(f"rrf={rrf:.2f}")
+
             ranked.append(
                 SearchResult(
                     document=doc,
@@ -248,6 +352,24 @@ class HybridSearcher:
             if pat.search(text):
                 return kind
         return None
+
+
+def _rrf_score(*ranked_lists: list[str], k: int = RRF_K) -> dict[str, float]:
+    """Reciprocal-rank-fusion score per chunk_id, summed across input lists.
+
+    Lists are assumed to be in best-first order. A chunk that appears at rank
+    r in list i contributes 1/(k+r) to its fused score; chunks present in
+    multiple lists accumulate. We multiply by a small constant (5.0) so the
+    final boost is comparable to the existing filename/kind boosts in the
+    ranker.
+    """
+    out: dict[str, float] = {}
+    for ids in ranked_lists:
+        for rank, cid in enumerate(ids):
+            if not cid:
+                continue
+            out[cid] = out.get(cid, 0.0) + 5.0 / (k + rank + 1)
+    return out
 
 
 def _dummy_chunk(doc: Document) -> DocumentChunk:

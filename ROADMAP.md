@@ -63,10 +63,15 @@ Spec §13 Phase 1. Goal: usable everyday search across Office formats.
 - ✅ **Query understanding** — `engine/query_understanding.py`. Parses 先月 / 去年 / 今年 / Q3 / 2025年4月 / April 2025 / 2024 into UTC date ranges. Period filter is HARD (user explicitly asked). Kind hints stay SOFT (boost only, never filter — proven by sample workspace where markdown invoices still surface for "請求書" queries even with no PDFs around).
 - ✅ **FTS5 prefix matching** — "請求" now hits "請求書"/"請求日" tokens. Each token emitted as both exact and prefix variants OR'd together.
 - ✅ **Background incremental indexing** — `engine/watcher.py` BackgroundIndexer + watchdog Observer per workspace, debounced 2s. MCP tools: `start_watch` / `stop_watch` / `list_watches`. CLI: `office-layer watch start/stop/list`. Integration tests (tmp dir + real watchdog) cover create + delete events.
-- ⬜ **Semantic search wired end-to-end** (sqlite-vec + small embedding model)
-  - Embedder candidates: `intfloat/multilingual-e5-small` (~120MB + PyTorch ~2GB) vs `fastembed` (onnxruntime, ~200MB total)
-  - Keep keyword-only as default; semantic on only when `workspace.enable_vector_search=True` AND adapter available
-  - Hybrid ranker fusion: reciprocal-rank-fusion of keyword + vector hits
+- ✅ **Semantic search wired end-to-end** (sqlite-vec + small embedding model)
+  - Storage owns `vec_chunks` (sqlite-vec `vec0`) keyed by chunk_id with workspace_id + document_id aux columns. Lazy `enable_vector_index(dim)` so cheap-PC installs never load the extension. `delete_document` drops vectors before metadata.
+  - `engine/embedder.py`: `FastembedEmbedder` (default, onnxruntime, ~200MB) → `SentenceTransformersEmbedder` (heavy, ~2GB PyTorch) → `NullEmbedder` fallback. Env override: `OFFICE_LAYER_EMBEDDER` / `OFFICE_LAYER_EMBED_MODEL`.
+  - `engine/semantic.SemanticIndex` glues embedder + storage with lazy init (embedder model loads only on first index, never on `status`).
+  - Indexer calls `semantic.index_chunks` after replacing chunks, gated on `ws.enable_vector_search`. Embedding lives outside the metadata `tx()` so slow embeds don't block FTS lookups.
+  - HybridSearcher merges vector hits into the candidate set with `reason: semantic` and a baseline score floor for pure-semantic chunks. RRF boost fires only when both keyword + vector lists returned hits (no double-counting top FTS).
+  - Per-workspace opt-in is honoured in both indexer and searcher — a query with `workspace_ids=None` skips semantic entirely.
+  - CLI: `office-layer workspace add --enable-vector`, `office-layer workspace set-vector <id> on|off`. MCP: `set_workspace_vector_search`. `status` shows `sqlite-vec + fastembed` or the missing-piece hint.
+  - Tests: `tests/test_semantic_search.py` (5 cases) — null fallback, disabled workspace no-op, semantic hit recovers a chunk FTS misses, vector cleanup on delete, no cross-workspace leak. Uses a deterministic 4-d FakeEmbedder so CI never downloads weights.
 - ⬜ Pagination / "show me more" beyond top-N
 - ⬜ Per-result locator polishing: PDF page text-rect, XLSX cell range for the actual matched token
 - ⬜ Index packaging (export / import for moving an index between machines)
@@ -189,3 +194,4 @@ See spec §17.6. Selection is automatic via `adapters/registry.py`.
 - **2026-05-17** PyMuPDF held back to AGPL opt-in; pypdfium2 + pdfplumber cover default needs.
 - **2026-05-17** Embeddings deferred to Phase 1 to keep Phase 0 install lightweight (no PyTorch).
 - **2026-05-17** Dropped TypeScript MCP server in favor of Python only — the OSS document libs live in Python; a JS port would be wheel-reinvention. The Node `package.json` ships the plugin / installer helpers only.
+- **2026-05-17** Phase 1.4 semantic search shipped. Embedding default is fastembed (onnxruntime) bundled into the `[vec-sqlite]` extra so users get a working pipeline from one install line — sentence-transformers stays available as a heavier opt-in. RRF only fires when both keyword + vector returned hits, to avoid rewarding top FTS twice when the embedder is missing.

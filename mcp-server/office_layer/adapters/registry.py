@@ -194,7 +194,7 @@ def _select_semantic() -> tuple[SemanticSearchAdapter | None, DegradedMode | Non
         DisabledSemanticAdapter(),
         DegradedMode(
             adapter_kind="semantic_search",
-            reason="Vector search disabled — install sqlite-vec or lancedb to enable.",
+            reason=a.reason or "Vector search disabled — install sqlite-vec to enable.",
             install_hint="pip install 'claude-code-office-layer[vec-sqlite]'",
         ),
     )

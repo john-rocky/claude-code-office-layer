@@ -67,11 +67,17 @@ ocr = [
 ocrmypdf = ["ocrmypdf>=16.0"]
 
 # Vector / semantic search — pick one.
-vec-sqlite = ["sqlite-vec>=0.1"]
+# `vec-sqlite` ships the embedder (fastembed, onnxruntime, ~200MB total)
+# alongside the vector store so the user gets a working semantic pipeline
+# from one install line.
+vec-sqlite = [
+    "sqlite-vec>=0.1",
+    "fastembed>=0.3",
+]
 vec-lancedb = ["lancedb>=0.10"]
 vec-chroma = ["chromadb>=0.5"]
 
-# Embedding model. Heavy (PyTorch). Opt-in only.
+# Heavier embedder (PyTorch, ~2GB). Use only if fastembed isn't viable.
 embeddings = ["sentence-transformers>=3.0"]
 
 # Email parsing.

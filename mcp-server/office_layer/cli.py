@@ -41,10 +41,13 @@ def status() -> None:
     t.add_row("office", ", ".join(a.name for a in r.office) or "[red]none[/red]")
     t.add_row("text", ", ".join(a.name for a in r.text))
     t.add_row("ocr", r.ocr.name if r.ocr else "[yellow]disabled[/yellow]")
-    t.add_row(
-        "semantic_search",
-        r.semantic_search.name if r.semantic_search and r.semantic_search.is_available() else "[yellow]disabled[/yellow]",
-    )
+    sem_label = "[yellow]disabled[/yellow]"
+    if engine.semantic.is_available():
+        sem_label = f"{r.semantic_search.name} + {engine.embedder.name}"
+    elif r.semantic_search and r.semantic_search.is_available():
+        # Backend installed but embedder missing — surface that to the user.
+        sem_label = f"{r.semantic_search.name} (no embedder: pip install fastembed)"
+    t.add_row("semantic_search", sem_label)
     t.add_row("file_watcher", r.file_watcher.name if r.file_watcher else "[yellow]disabled[/yellow]")
     console.print(t)
 
@@ -94,20 +97,33 @@ def workspace() -> None:
     show_default=True,
 )
 @click.option("--enable-ocr", is_flag=True, help="Allow OCR on scanned PDFs / images.")
+@click.option(
+    "--enable-vector",
+    is_flag=True,
+    help="Enable semantic (vector) search. Needs sqlite-vec + an embedder.",
+)
 @click.option("--max-size-mb", type=int, default=100, show_default=True)
 def workspace_add(
     root_path: Path,
     name: str | None,
     policy: str,
     enable_ocr: bool,
+    enable_vector: bool,
     max_size_mb: int,
 ) -> None:
     engine = get_engine()
+    if enable_vector and not engine.semantic.is_available():
+        console.print(
+            "[yellow]warning:[/yellow] --enable-vector requested but no embedder + sqlite-vec "
+            "backend is loaded. Flag will be stored, but indexing falls back to keyword-only "
+            "until you `pip install 'claude-code-office-layer[vec-sqlite]' fastembed`."
+        )
     ws = engine.workspaces.add(
         name=name or root_path.name,
         root_path=str(root_path),
         policy=WorkspacePolicy(policy),
         enable_ocr=enable_ocr,
+        enable_vector_search=enable_vector,
         max_file_size_mb=max_size_mb,
     )
     console.print(f"[green]Added[/green] workspace [bold]{ws.id}[/bold] → {ws.root_path}")
@@ -130,6 +146,30 @@ def workspace_remove(workspace_id: str) -> None:
     else:
         console.print(f"[red]Not found[/red]: {workspace_id}")
         sys.exit(1)
+
+
+@workspace.command("set-vector")
+@click.argument("workspace_id")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def workspace_set_vector(workspace_id: str, state: str) -> None:
+    """Toggle semantic (vector) search on a workspace. Re-index after turning on."""
+    engine = get_engine()
+    ws = engine.workspaces.set_vector_search(workspace_id, state == "on")
+    if ws is None:
+        console.print(f"[red]Not found[/red]: {workspace_id}")
+        sys.exit(1)
+    console.print(
+        f"[green]Updated[/green] {workspace_id}: enable_vector_search={ws.enable_vector_search}"
+    )
+    if state == "on" and not engine.semantic.is_available():
+        console.print(
+            "[yellow]note:[/yellow] no embedder + sqlite-vec available — flag is set but "
+            "indexing stays keyword-only until the backend is installed."
+        )
+    elif state == "on":
+        console.print(
+            "[dim]Run `office-layer index <workspace_id> --force` to embed existing chunks.[/dim]"
+        )
 
 
 @main.command()

@@ -1,17 +1,21 @@
 """SQLite-backed storage with FTS5 full-text index.
 
-Single file persistence keeps Phase 0 install trivial. Vector search (Phase 1+)
-plugs into a separate ChromaDB collection — see ``office_layer.engine.vector``.
+Single file persistence keeps Phase 0 install trivial. Optional vector index
+(Phase 1.4) lives in the same SQLite file via the sqlite-vec extension — see
+``enable_vector_index`` / ``vector_upsert`` / ``vector_query`` below.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+log = logging.getLogger(__name__)
 
 from .models import (
     AuditLogEntry,
@@ -196,6 +200,8 @@ class Storage:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
+        self._vec_loaded = False
+        self._vec_dim: int | None = None
 
     def close(self) -> None:
         self._conn.close()
@@ -395,6 +401,8 @@ class Storage:
         return [self._row_to_document(r) for r in rows]
 
     def delete_document(self, doc_id: str) -> None:
+        # Drop vectors first so we don't leave orphans when sqlite-vec is on.
+        self.vector_delete_document(doc_id)
         self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
     def count_documents(self, workspace_id: str) -> int:
@@ -683,3 +691,115 @@ class Storage:
             )
             for r in rows
         ]
+
+    # -- Vector index (sqlite-vec, optional) ----------------------------------
+
+    def enable_vector_index(self, dim: int) -> bool:
+        """Load sqlite-vec and create ``vec_chunks`` lazily.
+
+        Returns True iff vector ops are usable after this call. Safe to call
+        repeatedly. If the wheel is missing or the extension cannot be loaded
+        (e.g. Python built without ``--enable-loadable-sqlite-extensions``),
+        the caller stays in keyword-only mode without crashing.
+        """
+        if self._vec_loaded and self._vec_dim == dim:
+            return True
+        try:
+            import sqlite_vec  # type: ignore
+        except ImportError:
+            return False
+        try:
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+        except (AttributeError, sqlite3.OperationalError) as exc:
+            log.warning("sqlite-vec load failed: %s", exc)
+            return False
+
+        # Dim change between sessions would silently corrupt distance ranking
+        # — drop the table and let the indexer re-embed.
+        if self._vec_loaded and self._vec_dim != dim:
+            self._conn.execute("DROP TABLE IF EXISTS vec_chunks")
+
+        self._conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+                chunk_id TEXT PRIMARY KEY,
+                workspace_id TEXT,
+                document_id TEXT,
+                embedding float[{dim}]
+            )
+            """
+        )
+        self._vec_loaded = True
+        self._vec_dim = dim
+        return True
+
+    def vector_available(self) -> bool:
+        return self._vec_loaded
+
+    def vector_dim(self) -> int | None:
+        return self._vec_dim
+
+    def vector_upsert(
+        self,
+        chunk_id: str,
+        workspace_id: str,
+        document_id: str,
+        embedding: list[float],
+    ) -> None:
+        if not self._vec_loaded:
+            return
+        if self._vec_dim is not None and len(embedding) != self._vec_dim:
+            log.warning(
+                "vector_upsert dim mismatch (%d vs %d) — skipping %s",
+                len(embedding), self._vec_dim, chunk_id,
+            )
+            return
+        import sqlite_vec  # type: ignore
+
+        blob = sqlite_vec.serialize_float32(embedding)
+        # vec0 PRIMARY KEY rejects INSERT OR REPLACE; emulate upsert.
+        self._conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", (chunk_id,))
+        self._conn.execute(
+            "INSERT INTO vec_chunks(chunk_id, workspace_id, document_id, embedding) VALUES (?, ?, ?, ?)",
+            (chunk_id, workspace_id, document_id, blob),
+        )
+
+    def vector_query(
+        self,
+        embedding: list[float],
+        *,
+        workspace_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[tuple[str, float]]:
+        if not self._vec_loaded:
+            return []
+        import sqlite_vec  # type: ignore
+
+        blob = sqlite_vec.serialize_float32(embedding)
+        clauses = ["embedding MATCH ?", "k = ?"]
+        params: list[Any] = [blob, max(1, int(limit))]
+        if workspace_ids:
+            placeholders = ",".join("?" * len(workspace_ids))
+            clauses.append(f"workspace_id IN ({placeholders})")
+            params.extend(workspace_ids)
+        sql = f"SELECT chunk_id, distance FROM vec_chunks WHERE {' AND '.join(clauses)}"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [(r["chunk_id"], float(r["distance"])) for r in rows]
+
+    def vector_delete_chunk(self, chunk_id: str) -> None:
+        if not self._vec_loaded:
+            return
+        self._conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", (chunk_id,))
+
+    def vector_delete_document(self, document_id: str) -> None:
+        if not self._vec_loaded:
+            return
+        self._conn.execute("DELETE FROM vec_chunks WHERE document_id = ?", (document_id,))
+
+    def vector_count(self) -> int:
+        if not self._vec_loaded:
+            return 0
+        row = self._conn.execute("SELECT COUNT(*) AS c FROM vec_chunks").fetchone()
+        return int(row["c"]) if row else 0

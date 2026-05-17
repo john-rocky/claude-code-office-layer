@@ -29,6 +29,7 @@ from ..models import (
 )
 from ..storage import Storage
 from .entities import extract_entities
+from .semantic import SemanticIndex
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +74,15 @@ class IndexProgress:
 
 
 class Indexer:
-    def __init__(self, storage: Storage, registry: AdapterRegistry):
+    def __init__(
+        self,
+        storage: Storage,
+        registry: AdapterRegistry,
+        semantic: SemanticIndex | None = None,
+    ):
         self.storage = storage
         self.registry = registry
+        self.semantic = semantic
 
     # -- public ---------------------------------------------------------------
 
@@ -220,6 +227,15 @@ class Indexer:
                 self.storage.replace_extracted_fields(doc_id, result.fields)
             if entities:
                 self.storage.replace_entities(doc_id, entities)
+
+        # Vector index (if workspace opted in and the backend is loaded).
+        # Done outside the metadata transaction because embedding is the slow
+        # path and we don't want long-held writes blocking FTS lookups.
+        if ws.enable_vector_search and self.semantic is not None and result.chunks:
+            try:
+                self.semantic.index_chunks(result.chunks)
+            except Exception:
+                log.exception("semantic indexing failed for %s; keyword index unaffected", path)
         return True
 
     def _dispatch_extract(

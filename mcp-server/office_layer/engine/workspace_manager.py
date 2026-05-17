@@ -84,3 +84,11 @@ class WorkspaceManager:
         ws.policy = policy
         self.storage.upsert_workspace(ws)
         return ws
+
+    def set_vector_search(self, ws_id: str, enabled: bool) -> Workspace | None:
+        ws = self.storage.get_workspace(ws_id)
+        if ws is None:
+            return None
+        ws.enable_vector_search = enabled
+        self.storage.upsert_workspace(ws)
+        return ws
