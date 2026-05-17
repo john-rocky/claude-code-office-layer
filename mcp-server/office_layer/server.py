@@ -618,6 +618,7 @@ def draft_email_from_evidence(
             "citation_count": result.get("citation_count", 0),
             "checklist_item_count": result.get("checklist_item_count", 0),
             "language": result.get("language"),
+            "pii_hit_count": result.get("pii_hit_count", 0),
             "error": result.get("error"),
         },
     )

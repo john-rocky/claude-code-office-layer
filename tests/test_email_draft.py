@@ -363,3 +363,93 @@ def test_accepts_evidence_packet_object_directly(isolated_engine, tmp_path):
     )
     assert "error" not in out
     assert Path(out["output_path"]).exists()
+
+
+# -- PII checklist promotion --------------------------------------------------
+
+
+def test_pii_in_citation_preview_is_promoted_to_checklist(isolated_engine, tmp_path):
+    """A phone number sitting on the first line of a source doc lands in
+    the citation preview, so the PII scanner must catch it from the
+    body and promote a `Verify phone` checklist row."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    packet = _packet(
+        intent="支払期限のご確認",
+        sources=[
+            _source(
+                file_path=str(tmp_path / "x.md"),
+                file_name="x.md",
+                text="連絡先 山田 太郎  電話: 03-1234-5678\n本文以下省略",
+            )
+        ],
+    )
+    out = draft_email_from_evidence(
+        ws.id, packet=packet.model_dump(mode="json"),
+        recipient="ap@example.test", subject="ご請求",
+    )
+    assert out["pii_hit_count"] >= 1
+    body = Path(out["output_path"]).read_text(encoding="utf-8")
+    assert "PII 検出" in body
+    assert "03-1234-5678" in body
+
+
+def test_pii_in_extra_context_is_promoted(isolated_engine, tmp_path):
+    """A credit card pasted into extra_context must surface via Luhn."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    packet = _packet(sources=[_source(file_path="/ws/x.md", file_name="x.md", text="hello")])
+    out = draft_email_from_evidence(
+        ws.id,
+        packet=packet.model_dump(mode="json"),
+        recipient="ap@example.test",
+        subject="payment",
+        extra_context="card on file: 4111-1111-1111-1111",
+    )
+    assert out["pii_hit_count"] == 1
+    assert out["pii_hits"][0]["kind"] == "credit_card"
+
+
+def test_no_pii_means_no_pii_section(isolated_engine, tmp_path):
+    """Clean draft must not append a PII section — the row only appears
+    when there is something to confirm."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    packet = _packet(sources=[_source(file_path="/ws/x.md", file_name="x.md", text="hello")])
+    out = draft_email_from_evidence(
+        ws.id, packet=packet.model_dump(mode="json"),
+        recipient="jane@acme.test", subject="ping",
+    )
+    body = Path(out["output_path"]).read_text(encoding="utf-8")
+    assert out["pii_hit_count"] == 0
+    assert "PII 検出" not in body
+    assert "PII detected" not in body
+
+
+def test_invoice_id_with_separators_does_not_trigger_pii(isolated_engine, tmp_path):
+    """The canonical false-positive case from the manual probe:
+    `INV-1234-5678` as the subject + invoice_number must NOT raise a
+    credit_card warning."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    packet = _packet(
+        intent="支払期限のご確認",
+        sources=[
+            _source(
+                file_path=str(tmp_path / "inv.md"),
+                file_name="inv.md",
+                text="請求書\nINV-1234-5678",
+                fields=[_field("invoice_number", "INV-1234-5678", vt="id")],
+            )
+        ],
+    )
+    out = draft_email_from_evidence(
+        ws.id, packet=packet.model_dump(mode="json"),
+        recipient="ap@example.test",
+        subject="請求書 INV-1234-5678 の確認",
+    )
+    assert out["pii_hit_count"] == 0

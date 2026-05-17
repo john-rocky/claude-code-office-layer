@@ -51,6 +51,7 @@ from typing import Any
 from ..engine import get_engine
 from ..models import EvidencePacket
 from ..safety import intercept as _pretool_intercept
+from ..safety.pii import PIIHit, scan as _scan_pii
 
 # -- constants ---------------------------------------------------------------
 
@@ -138,6 +139,18 @@ def _coerce_packet(packet: Any) -> EvidencePacket | None:
 # -- body assembly -----------------------------------------------------------
 
 
+_PII_LABEL_JA = {
+    "mynumber": "個人番号 (マイナンバー)",
+    "credit_card": "クレジットカード番号",
+    "phone": "電話番号",
+}
+_PII_LABEL_EN = {
+    "mynumber": "My Number",
+    "credit_card": "credit card number",
+    "phone": "phone number",
+}
+
+
 @dataclass(frozen=True)
 class DraftEmail:
     draft_id: str
@@ -145,6 +158,7 @@ class DraftEmail:
     language: str
     citation_count: int
     checklist_item_count: int
+    pii_hits: tuple[PIIHit, ...] = ()
 
 
 def build_email_draft_body(
@@ -287,6 +301,35 @@ def build_email_draft_body(
             body.append(f"- [ ] 低信頼項目を再確認: {item}")
         else:
             body.append(f"- [ ] Re-check low-confidence item: {item}")
+
+    # PII scan — runs over the assembled body so it covers the citation
+    # previews, extracted-field checklist values, and any extra_context.
+    # Hits are promoted to dedicated checklist rows so the user is told
+    # explicitly which span to inspect before they hit send. Front-matter
+    # is excluded from the scan because workspace IDs / draft IDs / paths
+    # would otherwise produce noise (none of them ever pass Luhn or our
+    # phone shapes today, but it's cheaper to scope than to defend).
+    pii_hits = tuple(_scan_pii("\n".join(body[len(fm):])))
+    if pii_hits:
+        if lang == "ja":
+            body.append(
+                "- [ ] **PII 検出** — 下記の候補を本文に残すかどうか判断してください:"
+            )
+            for hit in pii_hits:
+                label = _PII_LABEL_JA.get(hit.kind, hit.kind)
+                body.append(
+                    f"  - [ ] {label}: `{hit.value}` (周辺: `{hit.evidence}`)"
+                )
+        else:
+            body.append(
+                "- [ ] **PII detected** — decide whether each candidate should "
+                "remain in the outgoing email:"
+            )
+            for hit in pii_hits:
+                label = _PII_LABEL_EN.get(hit.kind, hit.kind)
+                body.append(
+                    f"  - [ ] {label}: `{hit.value}` (near: `{hit.evidence}`)"
+                )
     body.append("")
 
     body.append("---")
@@ -302,8 +345,14 @@ def build_email_draft_body(
 
     body_str = "\n".join(body)
     citation_count = len(packet.sources)
-    # Header (3) + per-field + per-low-confidence.
-    checklist_count = 3 + len(seen) + len(packet.low_confidence_items)
+    # Header (3) + per-field + per-low-confidence + per-PII-hit + the
+    # PII summary row itself (when at least one hit fired).
+    checklist_count = (
+        3
+        + len(seen)
+        + len(packet.low_confidence_items)
+        + (1 + len(pii_hits) if pii_hits else 0)
+    )
 
     return DraftEmail(
         draft_id=draft_id,
@@ -311,6 +360,7 @@ def build_email_draft_body(
         language=lang,
         citation_count=citation_count,
         checklist_item_count=checklist_count,
+        pii_hits=pii_hits,
     )
 
 
@@ -448,6 +498,11 @@ def draft_email_from_evidence(
         "packet_source_count": len(coerced.sources),
         "body_markdown": draft.body_markdown,
         "risk": risk.model_dump(mode="json"),
+        "pii_hit_count": len(draft.pii_hits),
+        "pii_hits": [
+            {"kind": h.kind, "value": h.value, "evidence": h.evidence}
+            for h in draft.pii_hits
+        ],
     }
 
 

@@ -7,6 +7,7 @@ demand explicit user confirmation. Every important call writes to AuditLog.
 from .risk import RiskClassifier, classify_operation
 from .audit import AuditLogger
 from .pretool import InterceptResult, build_refusal, intercept
+from .pii import PIIHit, scan as scan_pii
 
 __all__ = [
     "RiskClassifier",
@@ -15,4 +16,6 @@ __all__ = [
     "intercept",
     "InterceptResult",
     "build_refusal",
+    "PIIHit",
+    "scan_pii",
 ]

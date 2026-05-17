@@ -703,6 +703,10 @@ def email_draft(
     if "error" in result:
         console.print(f"[red]{result['error']}[/red]")
         sys.exit(1)
+    pii_count = result.get("pii_hit_count", 0)
+    pii_part = (
+        f"  [yellow]pii_hits={pii_count}[/yellow]" if pii_count else ""
+    )
     console.print(
         f"[bold]draft staged[/bold]  [dim]({result['language']})[/dim]\n"
         f"path: {result['output_path']}\n"
@@ -710,7 +714,7 @@ def email_draft(
         f"subject: {result['subject']}\n"
         f"citations={result['citation_count']}  "
         f"checklist_items={result['checklist_item_count']}  "
-        f"sources_in_packet={result['packet_source_count']}"
+        f"sources_in_packet={result['packet_source_count']}{pii_part}"
     )
     console.rule("[bold]Preview")
     console.print(result["body_markdown"])
