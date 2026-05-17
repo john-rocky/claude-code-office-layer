@@ -3,11 +3,21 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|Bash",
-        "command": "office-layer risk write --target {tool_input.file_path} --workspace ${OFFICE_LAYER_DEFAULT_WORKSPACE}",
-        "description": "Run the safety classifier before any local write. High-risk writes block."
+        "matcher": "Write|Edit",
+        "command": "office-layer risk-intercept overwrite --target {tool_input.file_path} --workspace ${OFFICE_LAYER_DEFAULT_WORKSPACE}",
+        "description": "Run the safety classifier before any local write/edit. Refuses (exit 2) when the target is outside the workspace root or the workspace is read-only."
+      },
+      {
+        "matcher": "mcp__office_layer__extract_invoices_to_table",
+        "command": "office-layer risk-intercept export_csv --target {tool_input.output_path} --workspace {tool_input.workspace_id}",
+        "description": "Belt-and-suspenders gate for the invoice CSV export tool. The MCP tool runs the same intercept in-process; this hook short-circuits the call before it even reaches the server."
+      },
+      {
+        "matcher": "mcp__office_layer__draft_email_from_evidence",
+        "command": "office-layer risk-intercept new_draft --workspace {tool_input.workspace_id}",
+        "description": "Belt-and-suspenders gate for the email draft tool. Refuses HIGH classifications (read-only workspace) ahead of the MCP server invocation."
       }
     ]
   },
-  "_note": "Hook scripts shown here are illustrative — the runtime requires the `office-layer` CLI on PATH and the default-workspace env var to be set. Disable individual hooks by deleting them."
+  "_note": "Hooks require the `office-layer` CLI on PATH. The `Write|Edit` matcher uses ${OFFICE_LAYER_DEFAULT_WORKSPACE}; if that env var is unset, the workspace argument becomes empty and the classifier degrades to operation-only risk (no read-only / outside-workspace escalation). Disable individual hooks by deleting them."
 }

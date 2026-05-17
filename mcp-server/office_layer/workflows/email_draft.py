@@ -14,10 +14,11 @@ Design notes:
   signature accepts the packet itself (dict or :class:`EvidencePacket`)
   rather than a ``packet_id`` handle the tool would otherwise be unable
   to dereference.
-* The safety gate reuses the existing ``classify_operation("new_draft",
-  …)`` classifier (MEDIUM by default; read-only workspace escalates to
-  HIGH and refuses; target outside the workspace root escalates to HIGH
-  and refuses). No new safety code is introduced.
+* The safety gate goes through :func:`safety.pretool.intercept` with
+  operation ``"new_draft"`` (MEDIUM by default; read-only workspace
+  escalates to HIGH and refuses; target outside the workspace root
+  escalates to HIGH and refuses). The refusal shape is centralised
+  there so the next write tool inherits it for free.
 * The draft is ALWAYS staged under ``<workspace_root>/drafts/`` —
   callers cannot redirect into another subdir. ``send_email`` is HIGH-
   risk per spec §9.10.1; this workflow never crosses that line.
@@ -48,8 +49,8 @@ from pathlib import Path
 from typing import Any
 
 from ..engine import get_engine
-from ..models import EvidencePacket, OperationRiskLevel
-from ..safety import classify_operation
+from ..models import EvidencePacket
+from ..safety import intercept as _pretool_intercept
 
 # -- constants ---------------------------------------------------------------
 
@@ -410,18 +411,14 @@ def draft_email_from_evidence(
 
     # Safety gate — same pattern as workflows.invoices_table. "new_draft"
     # is MEDIUM by default; read-only workspace + outside-workspace
-    # target both escalate to HIGH and are refused.
-    risk = classify_operation(
+    # target both escalate to HIGH and are refused. The refuse contract
+    # lives in ``safety.pretool``.
+    gate = _pretool_intercept(
         "new_draft", targets=[str(target)], workspace=ws
     )
-    if risk.level == OperationRiskLevel.HIGH:
-        return {
-            "error": (
-                "refused: new_draft classified as HIGH risk "
-                f"({'; '.join(risk.reasons) or 'no reason given'})"
-            ),
-            "risk": risk.model_dump(mode="json"),
-        }
+    if gate.refusal is not None:
+        return gate.refusal
+    risk = gate.risk
 
     draft = build_email_draft_body(
         coerced,

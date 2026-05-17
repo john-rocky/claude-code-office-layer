@@ -56,8 +56,8 @@ from pathlib import Path
 from typing import Any
 
 from ..engine import get_engine
-from ..models import Document, DocumentKind, ExtractedField, OperationRiskLevel
-from ..safety import classify_operation
+from ..models import Document, DocumentKind, ExtractedField
+from ..safety import intercept as _pretool_intercept
 from .client_history import parse_amount
 from .invoice import extract_invoice_fields
 
@@ -205,18 +205,14 @@ def extract_invoices_to_table(
 
     # Safety gate. The classifier already encodes the two rules we care
     # about: read-only workspaces refuse writes, and targets outside the
-    # workspace root escalate to HIGH risk. Reject either way.
-    risk = classify_operation(
+    # workspace root escalate to HIGH risk. The refusal shape is owned
+    # by ``safety.pretool`` so every write workflow refuses the same way.
+    gate = _pretool_intercept(
         "export_csv", targets=[str(timestamped)], workspace=ws
     )
-    if risk.level == OperationRiskLevel.HIGH:
-        return {
-            "error": (
-                f"refused: export_csv classified as HIGH risk "
-                f"({'; '.join(risk.reasons) or 'no reason given'})"
-            ),
-            "risk": risk.model_dump(mode="json"),
-        }
+    if gate.refusal is not None:
+        return gate.refusal
+    risk = gate.risk
 
     # Collect candidate documents.
     docs = engine.storage.list_documents(workspace_id=workspace_id, limit=10_000)

@@ -17,7 +17,7 @@ from rich.table import Table
 from .engine import get_engine
 from .engine.evidence import EvidencePacketBuilder
 from .models import SearchQuery, WorkspacePolicy
-from .safety import classify_operation
+from .safety import classify_operation, intercept as _pretool_intercept
 from .workflows import (
     build_client_history as _build_client_history,
     compare_contracts as _compare_contracts,
@@ -725,6 +725,28 @@ def risk_cmd(operation: str, workspace_id: str | None, targets: tuple[str, ...])
     ws = engine.workspaces.get(workspace_id) if workspace_id else None
     r = classify_operation(operation, targets=list(targets), workspace=ws)
     console.print(r.model_dump_json(indent=2))
+
+
+@main.command("risk-intercept")
+@click.argument("operation")
+@click.option("--workspace", "workspace_id", default=None)
+@click.option("--target", "targets", multiple=True)
+def risk_intercept_cmd(
+    operation: str, workspace_id: str | None, targets: tuple[str, ...]
+) -> None:
+    """PreToolUse hook entrypoint: refuse HIGH ops with exit code 2.
+
+    Mirrors the in-process safety gate used by write workflows so a
+    Claude Code PreToolUse hook can short-circuit the call before the
+    MCP tool is even invoked. Exit 0 = allow, exit 2 = deny (Claude
+    Code surfaces stderr to the user when a hook exits 2).
+    """
+    engine = get_engine()
+    ws = engine.workspaces.get(workspace_id) if workspace_id else None
+    result = _pretool_intercept(operation, targets=list(targets), workspace=ws)
+    if result.refusal is not None:
+        click.echo(json.dumps(result.refusal, ensure_ascii=False), err=True)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
