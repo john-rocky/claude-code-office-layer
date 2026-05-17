@@ -11,6 +11,7 @@ from ..paths import db_path
 from ..storage import Storage
 from .indexer import Indexer
 from .search import HybridSearcher
+from .watcher import BackgroundIndexer
 from .workspace_manager import WorkspaceManager
 
 log = logging.getLogger(__name__)
@@ -23,9 +24,11 @@ class Engine:
         self.workspaces = WorkspaceManager(self.storage)
         self.indexer = Indexer(self.storage, self.registry)
         self.search = HybridSearcher(self.storage, self.registry)
+        self.background = BackgroundIndexer(self.storage, self.indexer, self.registry)
         self._lock = threading.Lock()
 
     def close(self) -> None:
+        self.background.stop_all()
         self.storage.close()
 
 

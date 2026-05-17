@@ -178,6 +178,41 @@ def start_indexing(workspace_id: str, *, force: bool = False, max_files: int | N
 
 
 @mcp.tool()
+def start_watch(workspace_id: str) -> dict:
+    """Start background incremental indexing for a workspace.
+
+    Watchdog re-indexes files as they change. Debounced 2s. Stop with
+    ``stop_watch``. Watchers stop automatically when the MCP server exits.
+    """
+    engine = get_engine()
+    try:
+        handle = engine.background.start(workspace_id)
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    _audit().record("start_watch", tool="start_watch", extra={"workspace_id": workspace_id})
+    return {
+        "workspace_id": handle.workspace_id,
+        "started_at": handle.started_at.isoformat(),
+    }
+
+
+@mcp.tool()
+def stop_watch(workspace_id: str) -> dict:
+    """Stop background watching for a workspace."""
+    ok = get_engine().background.stop(workspace_id)
+    _audit().record(
+        "stop_watch", tool="stop_watch", extra={"workspace_id": workspace_id, "stopped": ok}
+    )
+    return {"workspace_id": workspace_id, "stopped": ok}
+
+
+@mcp.tool()
+def list_watches() -> list[dict]:
+    """List active background watchers."""
+    return get_engine().background.list_watches()
+
+
+@mcp.tool()
 def get_index_status() -> dict:
     """Return adapter availability and per-workspace indexing state."""
     engine = get_engine()
@@ -197,6 +232,7 @@ def get_index_status() -> dict:
             for d in registry.degraded
         ],
         "workspaces": [w.model_dump(mode="json") for w in engine.workspaces.list()],
+        "watches": engine.background.list_watches(),
     }
 
 

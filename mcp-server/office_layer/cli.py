@@ -209,6 +209,48 @@ def evidence(intent: str, query: str, workspace_id: str | None, max_sources: int
         console.print(packet.summary_markdown())
 
 
+@main.group()
+def watch() -> None:
+    """Background incremental indexing."""
+
+
+@watch.command("start")
+@click.argument("workspace_id")
+def watch_start(workspace_id: str) -> None:
+    """Start watching a workspace for file-system changes."""
+    engine = get_engine()
+    try:
+        handle = engine.background.start(workspace_id)
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[green]Watching[/green] {workspace_id} (started_at={handle.started_at.isoformat()})"
+    )
+    console.print(
+        "[dim]The watcher runs in this process and stops when the CLI exits. "
+        "For long-running watches, use the MCP server via Claude Code.[/dim]"
+    )
+
+
+@watch.command("stop")
+@click.argument("workspace_id")
+def watch_stop(workspace_id: str) -> None:
+    ok = get_engine().background.stop(workspace_id)
+    if ok:
+        console.print(f"[green]Stopped[/green] watch for {workspace_id}")
+    else:
+        console.print(f"[yellow]No active watch for {workspace_id}[/yellow]")
+
+
+@watch.command("list")
+def watch_list() -> None:
+    for w in get_engine().background.list_watches():
+        console.print(
+            f"{w['workspace_id']}  started={w['started_at']}  events={w['events_processed']}  alive={w['alive']}"
+        )
+
+
 @main.command("risk")
 @click.argument("operation")
 @click.option("--workspace", "workspace_id", default=None)

@@ -28,6 +28,7 @@ from ..models import (
     WorkspaceStatus,
 )
 from ..storage import Storage
+from .entities import extract_entities
 
 log = logging.getLogger(__name__)
 
@@ -205,11 +206,20 @@ class Indexer:
             extraction_error=result.error,
             language_hints=result.language_hints,
         )
+        # Regex-baseline entities — cheap, no ML, gives the ranker free signal.
+        entities = []
+        for chunk in result.chunks:
+            entities.extend(
+                extract_entities(chunk.text, document_id=doc_id, chunk_id=chunk.id)
+            )
+
         with self.storage.tx():
             self.storage.upsert_document(doc)
             self.storage.replace_chunks(doc_id, result.chunks)
             if result.fields:
                 self.storage.replace_extracted_fields(doc_id, result.fields)
+            if entities:
+                self.storage.replace_entities(doc_id, entities)
         return True
 
     def _dispatch_extract(

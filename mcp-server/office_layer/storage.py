@@ -589,6 +589,54 @@ class Storage:
                 (e.document_id, e.chunk_id, e.text, e.kind, e.confidence),
             )
 
+    def get_entities(self, document_id: str) -> list[Entity]:
+        rows = self._conn.execute(
+            "SELECT * FROM entities WHERE document_id = ?", (document_id,)
+        ).fetchall()
+        return [
+            Entity(
+                document_id=r["document_id"],
+                chunk_id=r["chunk_id"],
+                text=r["text"],
+                kind=r["kind"],
+                confidence=r["confidence"],
+            )
+            for r in rows
+        ]
+
+    def find_documents_with_entity(
+        self,
+        text: str,
+        *,
+        kind: str | None = None,
+        workspace_ids: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[str]:
+        """Return document_ids that contain an entity matching ``text``.
+
+        Case-insensitive substring match. Cheap — used by the ranker to add
+        a boost when the user query mentions a company / email / domain.
+        """
+        clauses = ["LOWER(entities.text) LIKE ?"]
+        params: list[Any] = [f"%{text.lower()}%"]
+        if kind:
+            clauses.append("entities.kind = ?")
+            params.append(kind)
+        if workspace_ids:
+            placeholders = ",".join("?" * len(workspace_ids))
+            clauses.append(f"documents.workspace_id IN ({placeholders})")
+            params.extend(workspace_ids)
+        sql = f"""
+            SELECT DISTINCT entities.document_id
+            FROM entities
+            JOIN documents ON documents.id = entities.document_id
+            WHERE {' AND '.join(clauses)}
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [r["document_id"] for r in rows]
+
     # -- Audit log ------------------------------------------------------------
 
     def append_audit(self, entry: AuditLogEntry) -> None:

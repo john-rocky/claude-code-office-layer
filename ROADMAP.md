@@ -58,13 +58,15 @@ Spec §13 Phase 0. Goal: prove the round-trip.
 Spec §13 Phase 1. Goal: usable everyday search across Office formats.
 
 - ✅ Word / Excel / PowerPoint extraction (already shipped in Phase 0 since the adapter layer made it cheap)
-- ✅ Hybrid ranker (filename + content + recency + kind preference)
-- ⬜ Background incremental indexing — wire watchdog to push events into a worker thread that calls `Indexer.reindex_path`
-- ⬜ Semantic search wired end-to-end (sqlite-vec + small embedding model)
-  - Embedding pick: `intfloat/multilingual-e5-small` (good JA/EN, ~120MB) or `cl-nagoya/ruri-base` for JP-heavy use
-  - Make embeddings optional — default Phase 1 ships keyword-only
-- ⬜ Entity extraction — wire spaCy or a regex first-pass for {company, person, date, money, email}
-- ⬜ Query-understanding layer: parse "先月" / "去年" / "Q3" into date ranges before search
+- ✅ Hybrid ranker (filename + content + recency + kind preference + entity boost)
+- ✅ **Entity extraction** (regex baseline) — company / person / money / date / email / phone / url. Indexer stores via `Storage.replace_entities`. Ranker bumps documents whose entities match query terms (`reason: entity ~ '<term>'`). spaCy / GLiNER opt-in extras left as Phase 1.5 stretch.
+- ✅ **Query understanding** — `engine/query_understanding.py`. Parses 先月 / 去年 / 今年 / Q3 / 2025年4月 / April 2025 / 2024 into UTC date ranges. Period filter is HARD (user explicitly asked). Kind hints stay SOFT (boost only, never filter — proven by sample workspace where markdown invoices still surface for "請求書" queries even with no PDFs around).
+- ✅ **FTS5 prefix matching** — "請求" now hits "請求書"/"請求日" tokens. Each token emitted as both exact and prefix variants OR'd together.
+- ✅ **Background incremental indexing** — `engine/watcher.py` BackgroundIndexer + watchdog Observer per workspace, debounced 2s. MCP tools: `start_watch` / `stop_watch` / `list_watches`. CLI: `office-layer watch start/stop/list`. Integration tests (tmp dir + real watchdog) cover create + delete events.
+- ⬜ **Semantic search wired end-to-end** (sqlite-vec + small embedding model)
+  - Embedder candidates: `intfloat/multilingual-e5-small` (~120MB + PyTorch ~2GB) vs `fastembed` (onnxruntime, ~200MB total)
+  - Keep keyword-only as default; semantic on only when `workspace.enable_vector_search=True` AND adapter available
+  - Hybrid ranker fusion: reciprocal-rank-fusion of keyword + vector hits
 - ⬜ Pagination / "show me more" beyond top-N
 - ⬜ Per-result locator polishing: PDF page text-rect, XLSX cell range for the actual matched token
 - ⬜ Index packaging (export / import for moving an index between machines)
