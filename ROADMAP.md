@@ -88,14 +88,13 @@ Spec §13 Phase 1. Goal: usable everyday search across Office formats.
 
 Spec §13 Phase 2. Goal: turn evidence into artifacts.
 
-- ⬜ MCP tool: `extract_invoice_fields(document_id)` — regex + heuristic on extracted chunks
+- ✅ **MCP tool `extract_invoice_fields(document)`** — regex + label-anchored heuristic over indexed chunks. Three strategies per spec entry (same-line `label: value`, section-header `## label \n value`, fallback inline ID match). Detects: `invoice_number`, `issue_date`, `due_date`, `subtotal`, `tax`, `total`, `recipient`, `issuer`, `payment_account`. Confidence 0.95 / 0.75 / 0.65 by strategy. Verified against JP section-header MD, JP inline-colon MD, English invoice, XLSX layout, and the receipt-only edge case (5 fixtures under `examples/sample_workspace/invoices/`). CLI: `office-layer invoice extract <path-or-id>`. Persists into `extracted_fields` when `persist=true` (default). 12 dedicated tests in `tests/test_invoice_extraction.py`.
 - ⬜ MCP tool: `extract_contract_sections(document_id)` — clause boundaries by heading / 第N条
 - ⬜ MCP tool: `compare_contracts(doc_a_id, doc_b_id)` — clause pairing + diff
 - ⬜ MCP tool: `draft_email_from_evidence(packet_id, …)` — uses Claude via the parent agent; this tool just stages drafts in `<workspace>/drafts/`
 - ⬜ MCP tool: `extract_invoices_to_table(workspace_id, output_path)` — uses the above + safety check
-- ⬜ MCP tool: `compare_contracts(...)` — same
 - ⬜ MCP tool: `build_client_history(client_name)` — query expansion + multi-kind aggregation
-- ⬜ `workflows/` package: invoice / contract / email / client_history / folder_summary modules
+- ⬜ `workflows/` package: invoice ✅ / contract / email / client_history / folder_summary ✅
 
 ### Workflows directory layout
 
@@ -195,3 +194,4 @@ See spec §17.6. Selection is automatic via `adapters/registry.py`.
 - **2026-05-17** Embeddings deferred to Phase 1 to keep Phase 0 install lightweight (no PyTorch).
 - **2026-05-17** Dropped TypeScript MCP server in favor of Python only — the OSS document libs live in Python; a JS port would be wheel-reinvention. The Node `package.json` ships the plugin / installer helpers only.
 - **2026-05-17** Phase 1.4 semantic search shipped. Embedding default is fastembed (onnxruntime) bundled into the `[vec-sqlite]` extra so users get a working pipeline from one install line — sentence-transformers stays available as a heavier opt-in. RRF only fires when both keyword + vector returned hits, to avoid rewarding top FTS twice when the embedder is missing.
+- **2026-05-17** Phase 2 invoice extractor shipped as `extract_invoice_fields`. Picked a 3-strategy label-anchored regex over an LLM call — keeps the tool offline, deterministic, and easy to test (12 cases, 0.25s). The LLM path stays open for later as a fallback when the heuristic returns `low_confidence_keys`. Word-boundary check on ASCII labels was added after a "Total" / "Subtotal" collision surfaced on the English fixture.

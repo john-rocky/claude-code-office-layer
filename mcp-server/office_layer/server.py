@@ -21,6 +21,7 @@ from .models import (
     WorkspacePolicy,
 )
 from .safety import AuditLogger, classify_operation
+from .workflows import extract_invoice_fields as _extract_invoice_fields
 
 log = logging.getLogger(__name__)
 
@@ -404,6 +405,47 @@ def build_evidence_packet(
 
 
 # -- workflow tools -----------------------------------------------------------
+
+
+def _resolve_document_id(file_or_id: str) -> str | None:
+    """Accept either a document_id (`doc_xxx`) or a filesystem path."""
+    engine = get_engine()
+    doc = engine.storage.get_document(file_or_id)
+    if doc is not None:
+        return doc.id
+    p = Path(file_or_id).expanduser().resolve()
+    for ws in engine.workspaces.list():
+        match = engine.storage.get_document_by_path(ws.id, str(p))
+        if match is not None:
+            return match.id
+    return None
+
+
+@mcp.tool()
+def extract_invoice_fields(document: str, *, persist: bool = True) -> dict:
+    """Pull invoice fields (issuer / recipient / dates / amounts / account) from one indexed doc.
+
+    ``document`` is either a ``doc_xxx`` id or the file path of an already-
+    indexed document. Returns the extracted fields with confidence scores;
+    ``persist=true`` (default) also writes them to the storage so the next
+    ``build_evidence_packet`` call surfaces them under ``extracted_fields``.
+    """
+    doc_id = _resolve_document_id(document)
+    if doc_id is None:
+        return {"error": f"document not found (path or id): {document}"}
+    result = _extract_invoice_fields(doc_id, persist=persist)
+    _audit().record(
+        "extract_invoice_fields",
+        tool="extract_invoice_fields",
+        referenced_files=[result.get("document", {}).get("path", document)],
+        extra={
+            "document_id": doc_id,
+            "field_count": result.get("field_count", 0),
+            "avg_confidence": result.get("avg_confidence", 0.0),
+            "persisted": bool(persist),
+        },
+    )
+    return result
 
 
 @mcp.tool()

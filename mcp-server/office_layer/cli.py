@@ -18,6 +18,7 @@ from .engine import get_engine
 from .engine.evidence import EvidencePacketBuilder
 from .models import SearchQuery, WorkspacePolicy
 from .safety import classify_operation
+from .workflows import extract_invoice_fields as _extract_invoice_fields
 
 console = Console()
 
@@ -288,6 +289,59 @@ def watch_list() -> None:
     for w in get_engine().background.list_watches():
         console.print(
             f"{w['workspace_id']}  started={w['started_at']}  events={w['events_processed']}  alive={w['alive']}"
+        )
+
+
+@main.group()
+def invoice() -> None:
+    """Invoice workflows (Phase 2)."""
+
+
+@invoice.command("extract")
+@click.argument("document")
+@click.option("--no-persist", is_flag=True, help="Do not write fields back to storage.")
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def invoice_extract(document: str, no_persist: bool, json_output: bool) -> None:
+    """Extract invoice fields from an indexed document (path or doc_xxx id)."""
+    engine = get_engine()
+    doc = engine.storage.get_document(document)
+    if doc is None:
+        p = Path(document).expanduser().resolve()
+        for ws in engine.workspaces.list():
+            doc = engine.storage.get_document_by_path(ws.id, str(p))
+            if doc:
+                break
+    if doc is None:
+        console.print(f"[red]Document not found[/red]: {document}")
+        sys.exit(1)
+    result = _extract_invoice_fields(doc.id, persist=not no_persist)
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    console.print(
+        f"[bold]{doc.name}[/bold]  [dim]({doc.path})[/dim]\n"
+        f"fields={result['field_count']}  avg_conf={result['avg_confidence']}  "
+        f"persisted={result['persisted']}"
+    )
+    if not result["fields"]:
+        console.print("[yellow]No invoice-shaped fields detected.[/yellow]")
+        return
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("Key")
+    t.add_column("Value")
+    t.add_column("Type")
+    t.add_column("Conf", justify="right")
+    t.add_column("Source")
+    for f in result["fields"]:
+        conf = f["confidence"]
+        conf_str = f"{conf:.2f}"
+        if conf < 0.7:
+            conf_str = f"[yellow]{conf_str}[/yellow]"
+        t.add_row(f["key"], f["value"], f["value_type"], conf_str, f.get("extractor", ""))
+    console.print(t)
+    if result.get("low_confidence_keys"):
+        console.print(
+            f"[yellow]Low-confidence keys to review:[/yellow] {', '.join(result['low_confidence_keys'])}"
         )
 
 
