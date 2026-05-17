@@ -20,6 +20,7 @@ from .models import SearchQuery, WorkspacePolicy
 from .safety import classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
+    extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
 )
 
@@ -411,6 +412,56 @@ def client_history(
     t.add_column("Matched via")
     for row in result["timeline"]:
         t.add_row(row["date"][:10], row["kind"], row["name"], row["matched_via"])
+    console.print(t)
+
+
+@main.group()
+def contract() -> None:
+    """Contract workflows (Phase 2)."""
+
+
+@contract.command("sections")
+@click.argument("document")
+@click.option("--no-persist", is_flag=True, help="Do not write section fields back to storage.")
+@click.option("--body-cap", type=int, default=4096, show_default=True,
+              help="Per-section body character cap before truncation.")
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def contract_sections(
+    document: str, no_persist: bool, body_cap: int, json_output: bool
+) -> None:
+    """Cut a contract into clauses (`第N条` / `Section N` / `Article N`)."""
+    engine = get_engine()
+    doc = engine.storage.get_document(document)
+    if doc is None:
+        p = Path(document).expanduser().resolve()
+        for ws in engine.workspaces.list():
+            doc = engine.storage.get_document_by_path(ws.id, str(p))
+            if doc:
+                break
+    if doc is None:
+        console.print(f"[red]Document not found[/red]: {document}")
+        sys.exit(1)
+    result = _extract_contract_sections(
+        doc.id, persist=not no_persist, body_cap=body_cap
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    console.print(
+        f"[bold]{doc.name}[/bold]  [dim]({doc.path})[/dim]\n"
+        f"sections={result['section_count']}  persisted={result['persisted']}"
+    )
+    if not result["sections"]:
+        console.print("[yellow]No clause headings detected.[/yellow]")
+        return
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("#", justify="right")
+    t.add_column("Heading")
+    t.add_column("Body chars", justify="right")
+    t.add_column("Trunc")
+    for sec in result["sections"]:
+        trunc = "[yellow]yes[/yellow]" if sec["body_truncated"] else ""
+        t.add_row(str(sec["ordinal"]), sec["heading"], str(sec["body_char_count"]), trunc)
     console.print(t)
 
 

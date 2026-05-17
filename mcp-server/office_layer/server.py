@@ -23,6 +23,7 @@ from .models import (
 from .safety import AuditLogger, classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
+    extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
 )
 
@@ -490,6 +491,41 @@ def build_client_history(
             "invoice_count": result.get("invoice_count", 0),
             "contract_count": result.get("contract_count", 0),
             "workspace_ids": result.get("workspace_ids", []),
+        },
+    )
+    return result
+
+
+@mcp.tool()
+def extract_contract_sections(
+    document: str,
+    *,
+    persist: bool = True,
+    body_cap: int = 4096,
+) -> dict:
+    """Cut one indexed contract into clauses (`第N条` / `Section N` / `Article N`).
+
+    ``document`` is either a ``doc_xxx`` id or the file path of an already-
+    indexed document. Returns each section's ordinal / parsed title / full
+    heading / body / char offset, plus the preamble text before the first
+    clause. ``persist=true`` (default) also writes ``section.{n}.{title,
+    heading, body, body_truncated}`` extracted-field rows so a follow-up
+    ``compare_contracts`` or evidence-packet call can reach them. Existing
+    non-``section.*`` fields on the document (e.g. invoice fields) are not
+    disturbed.
+    """
+    doc_id = _resolve_document_id(document)
+    if doc_id is None:
+        return {"error": f"document not found (path or id): {document}"}
+    result = _extract_contract_sections(doc_id, persist=persist, body_cap=body_cap)
+    _audit().record(
+        "extract_contract_sections",
+        tool="extract_contract_sections",
+        referenced_files=[result.get("document", {}).get("path", document)],
+        extra={
+            "document_id": doc_id,
+            "section_count": result.get("section_count", 0),
+            "persisted": bool(persist),
         },
     )
     return result
