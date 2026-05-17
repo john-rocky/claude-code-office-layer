@@ -589,6 +589,48 @@ class Storage:
             for r in rows
         ]
 
+    def list_low_confidence_fields(
+        self,
+        workspace_id: str,
+        *,
+        threshold: float = 0.7,
+        limit: int = 1000,
+    ) -> list[ExtractedField]:
+        """All ``extracted_fields`` rows in a workspace with confidence < threshold.
+
+        Used by :mod:`workflows.low_confidence_review`. The JOIN against
+        ``documents`` scopes the walk to one workspace and orders by
+        ``document_id`` so the workflow can group adjacent rows without
+        sorting in Python. ``section.*`` keys (emitted by the contract
+        sectioner) are excluded — section bodies are not "values the user
+        can correct in one pass", they are pass-through extraction.
+        """
+        sql = """
+            SELECT extracted_fields.*
+            FROM extracted_fields
+            JOIN documents ON documents.id = extracted_fields.document_id
+            WHERE documents.workspace_id = ?
+              AND extracted_fields.confidence < ?
+              AND extracted_fields.key NOT LIKE 'section.%'
+            ORDER BY extracted_fields.document_id, extracted_fields.key
+            LIMIT ?
+        """
+        rows = self._conn.execute(sql, (workspace_id, threshold, limit)).fetchall()
+        return [
+            ExtractedField(
+                document_id=r["document_id"],
+                chunk_id=r["chunk_id"],
+                key=r["key"],
+                value=r["value"],
+                value_type=r["value_type"],
+                confidence=r["confidence"],
+                page_number=r["page_number"],
+                cell_range=r["cell_range"],
+                extractor=r["extractor"],
+            )
+            for r in rows
+        ]
+
     def replace_entities(self, document_id: str, entities: list[Entity]) -> None:
         self._conn.execute("DELETE FROM entities WHERE document_id = ?", (document_id,))
         for e in entities:

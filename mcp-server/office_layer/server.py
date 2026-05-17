@@ -24,6 +24,7 @@ from .safety import AuditLogger, classify_operation
 from .workflows import (
     build_client_history as _build_client_history,
     compare_contracts as _compare_contracts,
+    create_low_confidence_review as _create_low_confidence_review,
     draft_email_from_evidence as _draft_email_from_evidence,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
@@ -694,6 +695,40 @@ def summarize_folder(workspace_id: str, *, limit: int = 50) -> dict:
             for d in recent
         ],
     }
+
+
+@mcp.tool()
+def create_low_confidence_review(
+    workspace_id: str,
+    *,
+    threshold: float = 0.7,
+    limit: int = 1000,
+) -> dict:
+    """List every extracted field in the workspace below the confidence threshold.
+
+    Walks the persisted ``extracted_fields`` table for ``workspace_id``,
+    groups the flagged rows by document, and returns a checklist shape:
+    ``{workspace_id, threshold, limit, truncated, document_count,
+    item_count, groups: [{document_id, file_path, file_name, item_count,
+    items: [...]}]}``. Read-only — no safety gate. ``section.*`` keys
+    are excluded; OCR chunk confidence is intentionally out of scope.
+    """
+    result = _create_low_confidence_review(
+        workspace_id, threshold=threshold, limit=limit
+    )
+    _audit().record(
+        "create_low_confidence_review",
+        tool="create_low_confidence_review",
+        extra={
+            "workspace_id": workspace_id,
+            "threshold": threshold,
+            "document_count": result.get("document_count", 0),
+            "item_count": result.get("item_count", 0),
+            "truncated": result.get("truncated", False),
+            "error": result.get("error"),
+        },
+    )
+    return result
 
 
 # -- safety tools -------------------------------------------------------------

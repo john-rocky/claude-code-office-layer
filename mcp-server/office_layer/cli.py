@@ -21,6 +21,7 @@ from .safety import classify_operation, intercept as _pretool_intercept
 from .workflows import (
     build_client_history as _build_client_history,
     compare_contracts as _compare_contracts,
+    create_low_confidence_review as _create_low_confidence_review,
     draft_email_from_evidence as _draft_email_from_evidence,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
@@ -713,6 +714,68 @@ def email_draft(
     )
     console.rule("[bold]Preview")
     console.print(result["body_markdown"])
+
+
+@main.group()
+def review() -> None:
+    """Review workflows (Phase 3)."""
+
+
+@review.command("low-confidence")
+@click.argument("workspace_id")
+@click.option(
+    "--threshold",
+    type=click.FloatRange(0.0, 1.0, min_open=True),
+    default=0.7,
+    show_default=True,
+    help="Fields with confidence < THRESHOLD are surfaced.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+    help="Cap on flagged fields returned. truncated=true if exceeded.",
+)
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def review_low_confidence(
+    workspace_id: str, threshold: float, limit: int, json_output: bool
+) -> None:
+    """List every extracted field below ``--threshold`` for one-pass review."""
+    result = _create_low_confidence_review(
+        workspace_id, threshold=threshold, limit=limit
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[bold]low-confidence review[/bold]  "
+        f"threshold={result['threshold']}  "
+        f"documents={result['document_count']}  "
+        f"items={result['item_count']}"
+        + ("  [yellow](truncated)[/yellow]" if result.get("truncated") else "")
+    )
+    if not result["groups"]:
+        console.print("[dim]no flagged fields — workspace is clean[/dim]")
+        return
+    for g in result["groups"]:
+        console.rule(f"[bold]{g['file_name']}[/bold]  [dim]({g['document_id']})[/dim]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("key")
+        table.add_column("value")
+        table.add_column("conf", justify="right")
+        table.add_column("locator")
+        for it in g["items"]:
+            loc = ""
+            if it.get("page_number") is not None:
+                loc = f"p.{it['page_number']}"
+            elif it.get("cell_range"):
+                loc = str(it["cell_range"])
+            table.add_row(it["key"], it["value"], f"{it['confidence']:.2f}", loc)
+        console.print(table)
 
 
 @main.command("risk")

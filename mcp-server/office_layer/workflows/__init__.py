@@ -19,6 +19,11 @@ from .invoices_table import (
     build_invoice_rows,
     extract_invoices_to_table,
 )
+from .low_confidence_review import (
+    LowConfidenceGroup,
+    LowConfidenceItem,
+    create_low_confidence_review,
+)
 
 __all__ = [
     "summarize_folder",
@@ -34,4 +39,7 @@ __all__ = [
     "INVOICE_TABLE_COLUMNS",
     "draft_email_from_evidence",
     "build_email_draft_body",
+    "create_low_confidence_review",
+    "LowConfidenceGroup",
+    "LowConfidenceItem",
 ]
