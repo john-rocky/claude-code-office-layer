@@ -24,9 +24,14 @@ Pipeline:
    This is the canonical "this is actually an invoice" signal — the field
    only gets written when one of the three invoice strategies fired
    (label-anchored, section-header, or inline ID hint).
-5. Emit a CSV at ``output_path`` with a timestamp suffix appended so the
-   call is idempotent and never silently overwrites a prior export. Caller
-   gets the resolved final path back in the return dict.
+5. Run the mass-op gate on ``("bulk_modify", row_count, workspace)``. When
+   the row count exceeds ``BULK_MODIFY_THRESHOLD`` and the caller has not
+   yet passed ``confirm=True``, stage a ``<stem>.preview.csv`` (first 10
+   rows + the same header) and return a ``confirmation_required`` shape so
+   the caller can prompt the user and re-run.
+6. Emit the full CSV at ``output_path`` with a timestamp suffix appended
+   so the call is idempotent and never silently overwrites a prior export.
+   Caller gets the resolved final path back in the return dict.
 
 Public surface:
 
@@ -173,6 +178,35 @@ def _timestamped(path: Path) -> Path:
     return path.with_name(f"{path.stem}-{ts}{path.suffix or '.csv'}")
 
 
+# Rows shown in the preview CSV when the mass-op gate fires. Caller is
+# expected to eyeball the head, decide the export is what they wanted,
+# and re-run with --confirm. The preview itself is intentionally
+# non-timestamped: it's a transient review artifact that should
+# overwrite itself on re-runs, unlike the real export.
+_PREVIEW_HEAD = 10
+
+
+def _write_preview_csv(
+    target: Path, rows: list["InvoiceRow"], *, head: int = _PREVIEW_HEAD
+) -> Path:
+    """Write a head-of-table preview next to where the full CSV would land.
+
+    Filename is ``<target_stem>.preview.csv`` (no timestamp) so a re-run
+    of the same call overwrites its own previous preview rather than
+    leaving a pile of `.preview-YYYY...csv` files around.
+    """
+    preview = target.with_name(
+        f"{target.stem}.preview{target.suffix or '.csv'}"
+    )
+    preview.parent.mkdir(parents=True, exist_ok=True)
+    with preview.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(COLUMNS))
+        writer.writeheader()
+        for row in rows[:head]:
+            writer.writerow(row.values)
+    return preview
+
+
 # -- workflow entrypoint ------------------------------------------------------
 
 
@@ -181,6 +215,7 @@ def extract_invoices_to_table(
     output_path: str | Path,
     *,
     run_extractor: bool = True,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Export every invoice in ``workspace_id`` as a CSV row.
 
@@ -193,6 +228,14 @@ def extract_invoices_to_table(
     state of the source files. Pass ``False`` when you have already
     extracted and just want to materialise the table — the projection
     will then read whatever is in ``extracted_fields`` as-is.
+
+    ``confirm=False`` (default) makes a row count above
+    :data:`safety.BULK_MODIFY_THRESHOLD` stage a ``<stem>.preview.csv``
+    (first 10 rows + the same header) instead of writing the full file,
+    and return a ``confirmation_required`` shape so the caller can show
+    the preview to the user and re-run with ``confirm=True``. Pass
+    ``True`` to skip the preview gate and write the full export
+    directly.
     """
     engine = get_engine()
     ws = engine.workspaces.get(workspace_id)
@@ -254,6 +297,43 @@ def extract_invoices_to_table(
 
     rows = build_invoice_rows(docs_with_fields)
 
+    # Mass-op gate. Now that we know the actual row count, give the
+    # classifier a chance to demand explicit confirmation. We only run
+    # this gate when there are rows to write (an empty export already
+    # falls below the threshold and produces no preview to look at).
+    # Two outcomes worth handling:
+    #   * gate.refusal — the bulk_modify path also escalates to HIGH
+    #     for outside-workspace / read-only just like export_csv does;
+    #     mirror the existing refuse path so the contract is uniform.
+    #   * gate.confirmation — row_count > threshold AND caller has not
+    #     passed confirm=True yet. Stage a preview CSV and surface a
+    #     confirmation_required dict so the caller can show the head
+    #     to the user and re-run.
+    if rows:
+        mass_gate = _pretool_intercept(
+            "bulk_modify",
+            targets=[str(timestamped)],
+            workspace=ws,
+            row_count=len(rows),
+            confirm=confirm,
+        )
+        if mass_gate.refusal is not None:
+            return mass_gate.refusal
+        if mass_gate.confirmation is not None:
+            preview_path = _write_preview_csv(target, rows)
+            return {
+                **mass_gate.confirmation,
+                "workspace_id": workspace_id,
+                "preview_path": str(preview_path),
+                "output_path": None,
+                "row_count": len(rows),
+                "candidate_count": len(candidates),
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "columns": list(COLUMNS),
+                "ran_extractor": bool(run_extractor),
+            }
+
     # Write the CSV — header + one row per invoice. Always create parent
     # dirs because the workspace may have been added before the user
     # created a drafts/ subfolder; this avoids forcing them to mkdir
@@ -282,6 +362,7 @@ def extract_invoices_to_table(
         "columns": list(COLUMNS),
         "risk": risk.model_dump(mode="json"),
         "ran_extractor": bool(run_extractor),
+        "confirmed": bool(confirm),
     }
 
 

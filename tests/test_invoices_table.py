@@ -495,3 +495,148 @@ def test_timestamp_suffix_makes_consecutive_writes_distinct(isolated_engine, tmp
     # still be on disk (no overwrite happened).
     if p1 != p2:
         assert p1.exists() and p2.exists()
+
+
+# -- mass-op guard ------------------------------------------------------------
+
+
+def _seed_invoice(storage, ws, *, n: int) -> None:
+    """Seed a workspace with `n` pre-extracted invoice docs.
+
+    Uses `run_extractor=False` callers — the doc bodies are throwaway
+    (the extractor would not pick them up). Pre-persisted fields make
+    each row pass the `has invoice_number` filter so we can fan up to
+    arbitrary row counts without writing N realistic invoice markdowns.
+    """
+    for i in range(n):
+        _seed_doc(
+            storage, ws,
+            name=f"inv-{i:03d}.md",
+            rel_path=f"invoices/inv-{i:03d}.md",
+            text="# placeholder\n",
+            fields=[
+                ("invoice_number", f"INV-MASS-{i:03d}", "id", 0.95),
+                ("total", "¥10,000", "amount", 0.95),
+            ],
+        )
+
+
+def test_mass_op_at_threshold_writes_directly(isolated_engine, tmp_path):
+    """Exactly the threshold (5 rows) must NOT trigger the gate — the
+    rule is `> threshold`, not `>=`."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=5)
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    assert out.get("confirmation_required") is None or not out["confirmation_required"]
+    assert out["row_count"] == 5
+    assert out["output_path"] is not None
+    assert Path(out["output_path"]).exists()
+    # Preview file must NOT be staged when no confirmation is needed.
+    preview = tmp_path / "drafts" / "invoices.preview.csv"
+    assert not preview.exists()
+
+
+def test_mass_op_over_threshold_stages_preview_and_blocks_write(isolated_engine, tmp_path):
+    """6 rows + confirm=False: no full CSV, preview written, response
+    carries confirmation_required + preview_path."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=6)
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    assert out["confirmation_required"] is True
+    assert out["row_count"] == 6
+    assert out["output_path"] is None
+    assert out["reason"].startswith("bulk_modify of 6 rows exceeds")
+    # Preview file was written and contains the head, not the whole set.
+    preview_path = Path(out["preview_path"])
+    assert preview_path.exists()
+    assert preview_path.name == "invoices.preview.csv"
+    with preview_path.open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    # 6 rows ≤ default head of 10, so all of them land in the preview.
+    assert len(rows) == 6
+    # Critically, no timestamped CSV exists yet — only the preview.
+    timestamped = [p for p in (tmp_path / "drafts").iterdir() if p.name.startswith("invoices-")]
+    assert timestamped == []
+
+
+def test_mass_op_over_threshold_with_confirm_writes_full_csv(isolated_engine, tmp_path):
+    """confirm=True must skip the gate and write the full file."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=7)
+    out = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", run_extractor=False, confirm=True
+    )
+    assert not out.get("confirmation_required")
+    assert out["row_count"] == 7
+    assert out["confirmed"] is True
+    assert out["output_path"] is not None
+    with Path(out["output_path"]).open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 7
+
+
+def test_mass_op_preview_head_caps_at_10_for_large_row_counts(isolated_engine, tmp_path):
+    """A 50-row export must still stage just the first 10 rows in the
+    preview — the preview is a review artifact, not a stand-in for the
+    full export."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=50)
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    assert out["confirmation_required"] is True
+    assert out["row_count"] == 50
+    with Path(out["preview_path"]).open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 10
+
+
+def test_mass_op_preview_overwrites_on_rerun(isolated_engine, tmp_path):
+    """The preview file is intentionally NOT timestamped — re-running
+    the same call must overwrite its previous preview instead of
+    leaving a pile of `.preview-YYYY...csv` siblings."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=6)
+    out1 = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    out2 = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    # Same preview path on both calls.
+    assert out1["preview_path"] == out2["preview_path"]
+    # No accumulating `*.preview-*.csv` files.
+    drafts = tmp_path / "drafts"
+    preview_like = [p for p in drafts.iterdir() if ".preview" in p.name]
+    assert preview_like == [Path(out1["preview_path"])]
+
+
+def test_mass_op_refuses_read_only_workspace_before_preview(isolated_engine, tmp_path):
+    """A read-only workspace must refuse the export before staging any
+    preview — the workspace policy is a hard rule, not a soft one."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.READ_ONLY
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=10)
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    assert "error" in out
+    # And no preview was staged.
+    assert not (tmp_path / "drafts" / "invoices.preview.csv").exists()
+
+
+def test_mass_op_under_threshold_does_not_set_confirmed_when_default(isolated_engine, tmp_path):
+    """The `confirmed` field reflects the caller's intent, not the path
+    we took. Under-threshold + default confirm=False → confirmed=False
+    even though no gate fired."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=3)
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv", run_extractor=False)
+    assert out["confirmed"] is False
+    assert out["row_count"] == 3
+    assert out["output_path"] is not None

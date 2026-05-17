@@ -4,7 +4,9 @@ Operations the Office Layer recognises:
 - ``search`` / ``read`` / ``extract`` / ``summarize`` / ``draft``    → low
 - ``copy`` / ``export_csv`` / ``new_file_in_drafts``                 → medium
 - ``overwrite`` / ``delete`` / ``send_email`` / ``upload_external``  → high
-- ``bulk_modify`` / ``write_outside_workspace``                      → high
+- ``bulk_modify``                                                    → medium
+  + ``row_count > BULK_MODIFY_THRESHOLD`` → ``requires_confirmation``
+- ``write_outside_workspace``                                        → high
 """
 
 from __future__ import annotations
@@ -16,7 +18,13 @@ from ..models import OperationRisk, OperationRiskLevel, Workspace, WorkspacePoli
 
 LOW_OPS = {"search", "read", "extract", "summarize", "draft", "list", "describe"}
 MEDIUM_OPS = {"copy", "export_csv", "export_markdown", "export_json", "new_draft", "rename_proposal"}
-HIGH_OPS = {"overwrite", "delete", "send_email", "upload_external", "bulk_modify"}
+HIGH_OPS = {"overwrite", "delete", "send_email", "upload_external"}
+
+# Row count above which ``bulk_modify`` requires explicit caller
+# confirmation. Kept here (single source) so the guard threshold is
+# discoverable from one place; the workflow that surfaces a preview
+# imports this constant.
+BULK_MODIFY_THRESHOLD = 5
 
 
 def classify_operation(
@@ -24,13 +32,37 @@ def classify_operation(
     *,
     targets: list[str] | None = None,
     workspace: Workspace | None = None,
+    row_count: int | None = None,
 ) -> OperationRisk:
     op = operation.lower().strip()
     targets = targets or []
     reasons: list[str] = []
     suggested: str | None = None
+    bulk_threshold_tripped = False
 
-    if op in HIGH_OPS:
+    if op == "bulk_modify":
+        # Stays MEDIUM regardless of row_count. Refusing the natural batch
+        # path would block the legitimate use case the tool exists for
+        # (e.g. invoices_table aggregating N source documents into one
+        # CSV). Instead, > BULK_MODIFY_THRESHOLD rows demand an explicit
+        # caller acknowledgement via ``requires_confirmation`` — the
+        # workflow writes a preview artifact and asks the caller to
+        # re-run with confirm=True. Workspace-policy / outside-workspace
+        # escalation below can still bump this to HIGH for the usual
+        # reasons (read-only workspace, target outside the root).
+        level = OperationRiskLevel.MEDIUM
+        reasons.append(
+            "operation 'bulk_modify' aggregates changes from multiple sources"
+        )
+        suggested = (
+            "preview the staged rows, then re-run with explicit confirmation"
+        )
+        if row_count is not None and row_count > BULK_MODIFY_THRESHOLD:
+            bulk_threshold_tripped = True
+            reasons.append(
+                f"{row_count} rows exceeds the {BULK_MODIFY_THRESHOLD}-row safety threshold"
+            )
+    elif op in HIGH_OPS:
         level = OperationRiskLevel.HIGH
         reasons.append(f"operation '{op}' is high-risk")
         suggested = "split into a draft step + a separate explicit approval"
@@ -70,7 +102,9 @@ def classify_operation(
         operation=op,
         targets=targets,
         reasons=reasons,
-        requires_confirmation=(level == OperationRiskLevel.HIGH),
+        requires_confirmation=(
+            level == OperationRiskLevel.HIGH or bulk_threshold_tripped
+        ),
         suggested_safer_alternative=suggested,
     )
 
@@ -84,5 +118,8 @@ class RiskClassifier:
         *,
         targets: list[str] | None = None,
         workspace: Workspace | None = None,
+        row_count: int | None = None,
     ) -> OperationRisk:
-        return classify_operation(operation, targets=targets, workspace=workspace)
+        return classify_operation(
+            operation, targets=targets, workspace=workspace, row_count=row_count
+        )

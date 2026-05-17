@@ -541,6 +541,7 @@ def extract_invoices_to_table(
     output_path: str,
     *,
     run_extractor: bool = True,
+    confirm: bool = False,
 ) -> dict:
     """Export every invoice in ``workspace_id`` as one CSV row.
 
@@ -554,14 +555,25 @@ def extract_invoices_to_table(
     Refuses to run on read-only workspaces or write outside the workspace
     root. Pass ``run_extractor=false`` if the fields are already
     populated and you only want the table projection.
+
+    Mass-op guard: when more than 5 rows would be written, the first
+    call stages a ``<stem>.preview.csv`` (first 10 rows + header) and
+    returns ``confirmation_required: true`` instead of writing the full
+    file. Re-call with ``confirm=true`` to materialise the full CSV.
     """
     result = _extract_invoices_to_table(
-        workspace_id, output_path, run_extractor=run_extractor
+        workspace_id,
+        output_path,
+        run_extractor=run_extractor,
+        confirm=confirm,
     )
     _audit().record(
         "extract_invoices_to_table",
         tool="extract_invoices_to_table",
-        output_files=[result["output_path"]] if result.get("output_path") else [],
+        output_files=(
+            [result["output_path"]] if result.get("output_path")
+            else ([result["preview_path"]] if result.get("preview_path") else [])
+        ),
         extra={
             "workspace_id": workspace_id,
             "row_count": result.get("row_count", 0),
@@ -569,6 +581,8 @@ def extract_invoices_to_table(
             "skipped_count": result.get("skipped_count", 0),
             "low_confidence_count": result.get("low_confidence_count", 0),
             "ran_extractor": bool(run_extractor),
+            "confirmed": bool(confirm),
+            "confirmation_required": bool(result.get("confirmation_required")),
             "error": result.get("error"),
         },
     )

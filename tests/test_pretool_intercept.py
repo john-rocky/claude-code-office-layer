@@ -18,7 +18,13 @@ from office_layer.models import (  # noqa: E402
     Workspace,
     WorkspacePolicy,
 )
-from office_layer.safety import build_refusal, intercept  # noqa: E402
+from office_layer.safety import (  # noqa: E402
+    BULK_MODIFY_THRESHOLD,
+    build_confirmation,
+    build_refusal,
+    intercept,
+)
+from office_layer.safety.risk import classify_operation  # noqa: E402
 
 
 # -- pure intercept ----------------------------------------------------------
@@ -69,11 +75,108 @@ def test_build_refusal_format_is_stable() -> None:
     assert payload["risk"]["operation"] == "send_email"
 
 
+# -- bulk_modify mass-op guard ------------------------------------------------
+
+
+def test_bulk_modify_under_threshold_is_plain_medium() -> None:
+    """row_count <= threshold: medium risk, no confirmation gate."""
+    result = intercept("bulk_modify", row_count=BULK_MODIFY_THRESHOLD)
+    assert result.refused is False
+    assert result.needs_confirmation is False
+    assert result.risk.level == OperationRiskLevel.MEDIUM
+    assert result.risk.requires_confirmation is False
+
+
+def test_bulk_modify_no_row_count_is_plain_medium() -> None:
+    """Calling bulk_modify without a row_count must NOT escalate.
+
+    Used to be in HIGH_OPS and would refuse unconditionally; the new
+    contract is that the threshold only fires when the caller supplies
+    a row count.
+    """
+    result = intercept("bulk_modify")
+    assert result.refused is False
+    assert result.needs_confirmation is False
+    assert result.risk.level == OperationRiskLevel.MEDIUM
+
+
+def test_bulk_modify_over_threshold_without_confirm_needs_confirmation() -> None:
+    result = intercept("bulk_modify", row_count=BULK_MODIFY_THRESHOLD + 1)
+    assert result.refused is False
+    assert result.needs_confirmation is True
+    assert result.confirmation["confirmation_required"] is True
+    assert result.confirmation["row_count"] == BULK_MODIFY_THRESHOLD + 1
+    assert result.confirmation["threshold"] == BULK_MODIFY_THRESHOLD
+    assert result.risk.level == OperationRiskLevel.MEDIUM
+    assert result.risk.requires_confirmation is True
+
+
+def test_bulk_modify_over_threshold_with_confirm_proceeds() -> None:
+    result = intercept(
+        "bulk_modify",
+        row_count=BULK_MODIFY_THRESHOLD + 1,
+        confirm=True,
+    )
+    assert result.refused is False
+    assert result.needs_confirmation is False
+    # The classifier still records requires_confirmation on the risk
+    # itself — that field reflects the rule, not the acknowledgement.
+    assert result.risk.requires_confirmation is True
+
+
+def test_bulk_modify_outside_workspace_still_refuses(tmp_path: Path) -> None:
+    """A bulk_modify writing outside the workspace must still HIGH-refuse,
+    even if the caller passes confirm=True. HIGH always wins — confirm
+    only crosses the soft threshold, not the hard workspace boundary."""
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE)
+    result = intercept(
+        "bulk_modify",
+        targets=["/etc/passwd"],
+        workspace=ws,
+        row_count=100,
+        confirm=True,
+    )
+    assert result.refused is True
+    assert result.needs_confirmation is False
+    assert "outside workspace" in "; ".join(result.risk.reasons)
+
+
+def test_bulk_modify_read_only_workspace_refuses(tmp_path: Path) -> None:
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.READ_ONLY)
+    result = intercept(
+        "bulk_modify",
+        targets=[str(tmp_path / "x.csv")],
+        workspace=ws,
+        row_count=10,
+    )
+    assert result.refused is True
+    assert "read-only" in "; ".join(result.risk.reasons)
+
+
+def test_build_confirmation_format_is_stable() -> None:
+    risk = classify_operation("bulk_modify", row_count=42)
+    payload = build_confirmation(risk, row_count=42)
+    assert payload["confirmation_required"] is True
+    assert payload["row_count"] == 42
+    assert payload["threshold"] == BULK_MODIFY_THRESHOLD
+    assert "exceeds" in payload["reason"]
+    assert payload["risk"]["operation"] == "bulk_modify"
+    assert "confirm" in payload["how_to_proceed"]
+
+
+def test_classify_operation_bulk_modify_reasons_include_row_count() -> None:
+    risk = classify_operation("bulk_modify", row_count=12)
+    joined = "; ".join(risk.reasons)
+    assert "12 rows exceeds" in joined
+    assert str(BULK_MODIFY_THRESHOLD) in joined
+
+
 # Workflow-level integration (read-only workspace + outside-workspace
-# refusals) is already covered by tests/test_email_draft.py and
-# tests/test_invoices_table.py — those tests exercise the same code
-# path post-refactor and assert on the `error` / `risk` shape this
-# module now owns. Keeping the unit tests above narrow.
+# refusals, mass-op preview vs full write) is also covered by
+# tests/test_email_draft.py and tests/test_invoices_table.py — those
+# tests exercise the same code path post-refactor and assert on the
+# `error` / `risk` / `confirmation_required` shapes this module now
+# owns. Keeping the unit tests above narrow.
 
 
 # -- CLI hook entrypoint ------------------------------------------------------

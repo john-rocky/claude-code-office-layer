@@ -361,11 +361,21 @@ def invoice_extract(document: str, no_persist: bool, json_output: bool) -> None:
     is_flag=True,
     help="Project the already-persisted invoice fields without re-running the extractor.",
 )
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help=(
+        "Acknowledge the mass-op preview and write the full CSV. Without "
+        "this flag, exports over 5 rows stage a <stem>.preview.csv with "
+        "the first 10 rows so you can eyeball the result before committing."
+    ),
+)
 @click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
 def invoice_export(
     workspace_id: str,
     output_path: Path,
     no_extract: bool,
+    confirm: bool,
     json_output: bool,
 ) -> None:
     """Export every invoice in a workspace as one CSV row.
@@ -375,7 +385,10 @@ def invoice_export(
     overwrites a previous export.
     """
     result = _extract_invoices_to_table(
-        workspace_id, str(output_path), run_extractor=not no_extract
+        workspace_id,
+        str(output_path),
+        run_extractor=not no_extract,
+        confirm=confirm,
     )
     if json_output:
         click.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -383,6 +396,18 @@ def invoice_export(
     if "error" in result:
         console.print(f"[red]{result['error']}[/red]")
         sys.exit(1)
+    if result.get("confirmation_required"):
+        # Preview staged. Show the head + tell the user how to re-run.
+        console.print(
+            f"[yellow]confirmation required:[/yellow] {result['reason']}\n"
+            f"workspace={result['workspace_id']}  "
+            f"candidates={result['candidate_count']}  "
+            f"rows={result['row_count']}  "
+            f"skipped={result['skipped_count']}\n"
+            f"preview: {result['preview_path']}\n"
+            f"[bold]re-run with --confirm[/bold] to write the full CSV."
+        )
+        return
     out = result.get("output_path")
     note = result.get("note")
     console.print(
