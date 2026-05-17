@@ -26,6 +26,7 @@ from .workflows import (
     compare_contracts as _compare_contracts,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
+    extract_invoices_to_table as _extract_invoices_to_table,
 )
 
 log = logging.getLogger(__name__)
@@ -527,6 +528,46 @@ def extract_contract_sections(
             "document_id": doc_id,
             "section_count": result.get("section_count", 0),
             "persisted": bool(persist),
+        },
+    )
+    return result
+
+
+@mcp.tool()
+def extract_invoices_to_table(
+    workspace_id: str,
+    output_path: str,
+    *,
+    run_extractor: bool = True,
+) -> dict:
+    """Export every invoice in ``workspace_id`` as one CSV row.
+
+    Loops the invoice extractor over each PDF / MD / XLSX / DOCX in the
+    workspace, keeps the docs that produced an ``invoice_number``, and
+    writes a 12-column CSV (invoice_number, issue_date, due_date, issuer,
+    recipient, subtotal, tax, total, currency, payment_account,
+    source_path, confidence_avg). Relative ``output_path`` is resolved
+    against the workspace root; a UTC timestamp suffix is appended to the
+    filename so re-running never silently overwrites a previous export.
+    Refuses to run on read-only workspaces or write outside the workspace
+    root. Pass ``run_extractor=false`` if the fields are already
+    populated and you only want the table projection.
+    """
+    result = _extract_invoices_to_table(
+        workspace_id, output_path, run_extractor=run_extractor
+    )
+    _audit().record(
+        "extract_invoices_to_table",
+        tool="extract_invoices_to_table",
+        output_files=[result["output_path"]] if result.get("output_path") else [],
+        extra={
+            "workspace_id": workspace_id,
+            "row_count": result.get("row_count", 0),
+            "candidate_count": result.get("candidate_count", 0),
+            "skipped_count": result.get("skipped_count", 0),
+            "low_confidence_count": result.get("low_confidence_count", 0),
+            "ran_extractor": bool(run_extractor),
+            "error": result.get("error"),
         },
     )
     return result

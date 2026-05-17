@@ -23,6 +23,7 @@ from .workflows import (
     compare_contracts as _compare_contracts,
     extract_contract_sections as _extract_contract_sections,
     extract_invoice_fields as _extract_invoice_fields,
+    extract_invoices_to_table as _extract_invoices_to_table,
 )
 
 console = Console()
@@ -347,6 +348,61 @@ def invoice_extract(document: str, no_persist: bool, json_output: bool) -> None:
     if result.get("low_confidence_keys"):
         console.print(
             f"[yellow]Low-confidence keys to review:[/yellow] {', '.join(result['low_confidence_keys'])}"
+        )
+
+
+@invoice.command("export")
+@click.argument("workspace_id")
+@click.argument("output_path", type=click.Path(path_type=Path))
+@click.option(
+    "--no-extract",
+    is_flag=True,
+    help="Project the already-persisted invoice fields without re-running the extractor.",
+)
+@click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
+def invoice_export(
+    workspace_id: str,
+    output_path: Path,
+    no_extract: bool,
+    json_output: bool,
+) -> None:
+    """Export every invoice in a workspace as one CSV row.
+
+    Relative paths resolve against the workspace root. A UTC timestamp
+    suffix is appended to the filename so re-running never silently
+    overwrites a previous export.
+    """
+    result = _extract_invoices_to_table(
+        workspace_id, str(output_path), run_extractor=not no_extract
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    out = result.get("output_path")
+    note = result.get("note")
+    console.print(
+        f"[bold]workspace[/bold] {result['workspace_id']}\n"
+        f"candidates={result['candidate_count']}  rows={result['row_count']}  "
+        f"skipped={result['skipped_count']}  "
+        f"low_conf={result['low_confidence_count']}\n"
+        f"output: {out or '[yellow]none[/yellow]'}"
+    )
+    if note:
+        console.print(f"[yellow]{note}[/yellow]")
+    if result["skipped"]:
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("Document")
+        t.add_column("Reason")
+        for s in result["skipped"]:
+            t.add_row(s["path"], s["reason"])
+        console.print(t)
+    if result["low_confidence_paths"]:
+        console.print(
+            f"[yellow]Low-confidence rows to review:[/yellow]\n  "
+            + "\n  ".join(result["low_confidence_paths"])
         )
 
 

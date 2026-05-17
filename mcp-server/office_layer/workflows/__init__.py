@@ -13,6 +13,11 @@ from .contract_sections import (
 )
 from .folder_summary import summarize_folder
 from .invoice import extract_fields_from_text, extract_invoice_fields
+from .invoices_table import (
+    COLUMNS as INVOICE_TABLE_COLUMNS,
+    build_invoice_rows,
+    extract_invoices_to_table,
+)
 
 __all__ = [
     "summarize_folder",
@@ -23,4 +28,7 @@ __all__ = [
     "extract_sections_from_text",
     "compare_contracts",
     "compare_sections",
+    "extract_invoices_to_table",
+    "build_invoice_rows",
+    "INVOICE_TABLE_COLUMNS",
 ]

@@ -1,22 +1,27 @@
 ---
-description: Extract invoice fields (issuer, date, amount, due date) from PDFs in a folder. (Phase 2)
-allowed-tools: ["mcp__office-layer__build_evidence_packet", "mcp__office-layer__search_files"]
+description: Export every invoice in a workspace as one CSV row. (Phase 2)
+allowed-tools: ["mcp__office-layer__extract_invoices_to_table"]
 ---
 
-**Phase 2 workflow — not yet a single MCP tool.**
+**Phase 2 workflow — single MCP tool.**
 
-Until the dedicated `extract_invoices_to_table` tool ships, use this flow with the Phase 0 building blocks:
+1. Call `extract_invoices_to_table(workspace_id=<id>, output_path=<rel_or_abs_path>)`.
+   - Relative paths resolve against the workspace root.
+   - A UTC timestamp suffix is appended to the filename, so re-running never
+     silently overwrites a previous export.
+   - The tool loops `extract_invoice_fields` over every PDF / MD / XLSX / DOCX
+     in the workspace, keeps the docs that produced an `invoice_number`, and
+     writes a 12-column CSV.
+2. The return dict carries `row_count`, `skipped` (with reason per dropped
+   doc), `low_confidence_paths`, and the final `output_path` with timestamp.
+3. Surface `low_confidence_paths` to the user with the prompt "verify these by
+   hand before sending the CSV downstream".
+4. If the tool returns `error`: it is one of (workspace not found) /
+   (workspace is read-only) / (output path is outside the workspace root).
+   None of these should be retried automatically — surface to the user.
 
-1. Call `search_files` with the user's request (e.g. `"請求書 2025 取引先"`) restricted to the relevant workspace.
-2. For each top candidate, call `build_evidence_packet(intent="extract invoice fields", query=<file_name>)`.
-3. From each packet's extracted text + tables, draft these fields with citations:
-   - issuer (取引先)
-   - invoice number (請求書番号)
-   - invoice date (請求日)
-   - due date (支払期限)
-   - subtotal / tax / total (小計 / 消費税 / 合計)
-   - payment account (振込先)
-4. Emit a single Markdown table. For every cell, cite `file_name p.N` (or sheet/cell).
-5. List any low-confidence rows separately and tell the user to verify those manually.
+Columns (in order): `invoice_number, issue_date, due_date, issuer, recipient,
+subtotal, tax, total, currency, payment_account, source_path, confidence_avg`.
 
-Do NOT write CSV or modify files yet — that is a higher-risk operation gated by `/office-export-csv`.
+Pass `run_extractor=false` only when the fields are already persisted and the
+caller just wants the CSV projection.
