@@ -542,6 +542,7 @@ def extract_invoices_to_table(
     *,
     run_extractor: bool = True,
     confirm: bool = False,
+    overwrite: bool = False,
 ) -> dict:
     """Export every invoice in ``workspace_id`` as one CSV row.
 
@@ -550,29 +551,43 @@ def extract_invoices_to_table(
     writes a 12-column CSV (invoice_number, issue_date, due_date, issuer,
     recipient, subtotal, tax, total, currency, payment_account,
     source_path, confidence_avg). Relative ``output_path`` is resolved
-    against the workspace root; a UTC timestamp suffix is appended to the
-    filename so re-running never silently overwrites a previous export.
-    Refuses to run on read-only workspaces or write outside the workspace
-    root. Pass ``run_extractor=false`` if the fields are already
-    populated and you only want the table projection.
+    against the workspace root; by default a UTC timestamp suffix is
+    appended to the filename so re-running never silently overwrites a
+    previous export. Refuses to run on read-only workspaces or write
+    outside the workspace root. Pass ``run_extractor=false`` if the
+    fields are already populated and you only want the table projection.
 
     Mass-op guard: when more than 5 rows would be written, the first
     call stages a ``<stem>.preview.csv`` (first 10 rows + header) and
     returns ``confirmation_required: true`` instead of writing the full
     file. Re-call with ``confirm=true`` to materialise the full CSV.
+
+    Overwrite gate: ``overwrite=true`` opts into the bare
+    ``output_path`` (no timestamp). If the file already exists, the
+    first call stages a ``<stem>.diff.txt`` showing the proposed change
+    and returns ``confirmation_required: true``. Re-call with both
+    ``overwrite=true`` and ``confirm=true`` to actually replace the
+    file. Workspace boundary / read-only escalations still refuse the
+    overwrite — ``confirm=true`` does not cross those hard rules.
     """
     result = _extract_invoices_to_table(
         workspace_id,
         output_path,
         run_extractor=run_extractor,
         confirm=confirm,
+        overwrite=overwrite,
     )
     _audit().record(
         "extract_invoices_to_table",
         tool="extract_invoices_to_table",
         output_files=(
             [result["output_path"]] if result.get("output_path")
-            else ([result["preview_path"]] if result.get("preview_path") else [])
+            else [
+                p for p in (
+                    result.get("preview_path"),
+                    result.get("diff_path"),
+                ) if p
+            ]
         ),
         extra={
             "workspace_id": workspace_id,
@@ -582,6 +597,7 @@ def extract_invoices_to_table(
             "low_confidence_count": result.get("low_confidence_count", 0),
             "ran_extractor": bool(run_extractor),
             "confirmed": bool(confirm),
+            "overwrite_requested": bool(overwrite),
             "confirmation_required": bool(result.get("confirmation_required")),
             "error": result.get("error"),
         },

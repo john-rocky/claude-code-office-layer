@@ -171,6 +171,93 @@ def test_classify_operation_bulk_modify_reasons_include_row_count() -> None:
     assert str(BULK_MODIFY_THRESHOLD) in joined
 
 
+# -- confirmable_overwrite gate ----------------------------------------------
+
+
+def test_overwrite_op_stays_hard_refuse_high() -> None:
+    """The plain ``overwrite`` op stays in HIGH_OPS and refuses
+    unconditionally — even with confirm=True. The soft-confirm path is
+    only reachable via the separate ``confirmable_overwrite`` op key."""
+    result = intercept("overwrite", confirm=True)
+    assert result.refused is True
+    assert result.refusal["risk"]["level"] == "high"
+
+
+def test_confirmable_overwrite_without_confirm_needs_confirmation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "x.csv"
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE)
+    result = intercept(
+        "confirmable_overwrite", targets=[str(target)], workspace=ws
+    )
+    assert result.refused is False
+    assert result.needs_confirmation is True
+    assert result.confirmation["confirmation_required"] is True
+    assert result.risk.level == OperationRiskLevel.MEDIUM
+    assert result.risk.requires_confirmation is True
+    assert "confirmable_overwrite would replace" in result.confirmation["reason"]
+
+
+def test_confirmable_overwrite_with_confirm_proceeds(tmp_path: Path) -> None:
+    target = tmp_path / "x.csv"
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE)
+    result = intercept(
+        "confirmable_overwrite",
+        targets=[str(target)],
+        workspace=ws,
+        confirm=True,
+    )
+    assert result.refused is False
+    assert result.needs_confirmation is False
+    # ``requires_confirmation`` on the risk reflects the rule (always
+    # true for this op key) — the workflow already consumed it.
+    assert result.risk.requires_confirmation is True
+
+
+def test_confirmable_overwrite_outside_workspace_refuses_even_with_confirm(
+    tmp_path: Path,
+) -> None:
+    """HIGH always wins. ``confirm=True`` crosses the soft caller-
+    consent gate, not the hard workspace boundary."""
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE)
+    result = intercept(
+        "confirmable_overwrite",
+        targets=["/etc/passwd"],
+        workspace=ws,
+        confirm=True,
+    )
+    assert result.refused is True
+    assert "outside workspace" in "; ".join(result.risk.reasons)
+
+
+def test_confirmable_overwrite_read_only_workspace_refuses(tmp_path: Path) -> None:
+    ws = Workspace(name="d", root_path=str(tmp_path), policy=WorkspacePolicy.READ_ONLY)
+    result = intercept(
+        "confirmable_overwrite",
+        targets=[str(tmp_path / "x.csv")],
+        workspace=ws,
+        confirm=True,
+    )
+    assert result.refused is True
+    assert "read-only" in "; ".join(result.risk.reasons)
+
+
+def test_build_confirmation_overwrite_shape_is_stable() -> None:
+    from office_layer.safety import build_confirmation
+
+    risk = classify_operation(
+        "confirmable_overwrite", targets=["/tmp/x.csv"]
+    )
+    payload = build_confirmation(risk, row_count=None)
+    assert payload["confirmation_required"] is True
+    assert payload["row_count"] is None
+    # threshold is bulk-specific; overwrite payloads must not carry one.
+    assert payload["threshold"] is None
+    assert "/tmp/x.csv" in payload["reason"]
+    assert payload["risk"]["operation"] == "confirmable_overwrite"
+
+
 # Workflow-level integration (read-only workspace + outside-workspace
 # refusals, mass-op preview vs full write) is also covered by
 # tests/test_email_draft.py and tests/test_invoices_table.py — those

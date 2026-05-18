@@ -365,9 +365,21 @@ def invoice_extract(document: str, no_persist: bool, json_output: bool) -> None:
     "--confirm",
     is_flag=True,
     help=(
-        "Acknowledge the mass-op preview and write the full CSV. Without "
-        "this flag, exports over 5 rows stage a <stem>.preview.csv with "
-        "the first 10 rows so you can eyeball the result before committing."
+        "Acknowledge the staged preview (mass-op CSV preview or "
+        "overwrite diff) and write the full file. Without this flag, "
+        "exports over 5 rows stage a <stem>.preview.csv and "
+        "overwrites stage a <stem>.diff.txt so you can eyeball the "
+        "result before committing."
+    ),
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help=(
+        "Write to OUTPUT_PATH literally (no timestamp suffix). If the "
+        "file already exists, the first call stages a <stem>.diff.txt "
+        "showing the proposed change; re-run with --overwrite "
+        "--confirm to replace the file."
     ),
 )
 @click.option("--json-output", "json_output", is_flag=True, help="Emit raw JSON.")
@@ -376,19 +388,23 @@ def invoice_export(
     output_path: Path,
     no_extract: bool,
     confirm: bool,
+    overwrite: bool,
     json_output: bool,
 ) -> None:
     """Export every invoice in a workspace as one CSV row.
 
-    Relative paths resolve against the workspace root. A UTC timestamp
-    suffix is appended to the filename so re-running never silently
-    overwrites a previous export.
+    Relative paths resolve against the workspace root. By default a UTC
+    timestamp suffix is appended to the filename so re-running never
+    silently overwrites a previous export. Pass ``--overwrite`` to
+    write at the bare path; existing files trigger a diff preview that
+    must be acknowledged with ``--confirm``.
     """
     result = _extract_invoices_to_table(
         workspace_id,
         str(output_path),
         run_extractor=not no_extract,
         confirm=confirm,
+        overwrite=overwrite,
     )
     if json_output:
         click.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -397,14 +413,17 @@ def invoice_export(
         console.print(f"[red]{result['error']}[/red]")
         sys.exit(1)
     if result.get("confirmation_required"):
-        # Preview staged. Show the head + tell the user how to re-run.
+        # Two distinct preview shapes share this branch — mass-op
+        # exposes `preview_path`, overwrite exposes `diff_path`.
+        staged = result.get("preview_path") or result.get("diff_path")
+        staged_label = "preview" if result.get("preview_path") else "diff"
         console.print(
             f"[yellow]confirmation required:[/yellow] {result['reason']}\n"
             f"workspace={result['workspace_id']}  "
             f"candidates={result['candidate_count']}  "
             f"rows={result['row_count']}  "
             f"skipped={result['skipped_count']}\n"
-            f"preview: {result['preview_path']}\n"
+            f"{staged_label}: {staged}\n"
             f"[bold]re-run with --confirm[/bold] to write the full CSV."
         )
         return

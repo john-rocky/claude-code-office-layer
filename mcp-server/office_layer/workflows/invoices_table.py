@@ -29,9 +29,16 @@ Pipeline:
    yet passed ``confirm=True``, stage a ``<stem>.preview.csv`` (first 10
    rows + the same header) and return a ``confirmation_required`` shape so
    the caller can prompt the user and re-run.
-6. Emit the full CSV at ``output_path`` with a timestamp suffix appended
-   so the call is idempotent and never silently overwrites a prior export.
-   Caller gets the resolved final path back in the return dict.
+6. Resolve where the CSV will actually land. By default a UTC timestamp
+   suffix is appended so the call is idempotent and never silently
+   overwrites a prior export. ``overwrite=True`` opts into the bare path
+   (no timestamp) — when that path is empty we write directly, but when
+   it points at an existing file we stage a unified-diff preview
+   (``<stem>.diff.txt``) and return ``confirmation_required`` via the
+   ``confirmable_overwrite`` safety op. Re-call with ``confirm=True`` to
+   replace the file.
+7. Emit the CSV at the resolved path. Caller gets the resolved final
+   path back in the return dict.
 
 Public surface:
 
@@ -55,6 +62,8 @@ extraction is not penalised twice.
 from __future__ import annotations
 
 import csv
+import difflib
+import io
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,6 +216,61 @@ def _write_preview_csv(
     return preview
 
 
+# Context lines per unified-diff hunk in the overwrite preview. 3 is the
+# diff(1) default and matches contract_diff. Larger windows just inflate
+# the preview file without helping the reviewer.
+_OVERWRITE_DIFF_CONTEXT = 3
+
+
+def _rows_to_csv_text(rows: list["InvoiceRow"]) -> str:
+    """Serialise rows to the same CSV bytes we would write to disk.
+
+    Used by the overwrite gate to diff the would-be new content against
+    the existing on-disk file without writing anything first.
+    """
+    buf = io.StringIO(newline="")
+    writer = csv.DictWriter(buf, fieldnames=list(COLUMNS))
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row.values)
+    return buf.getvalue()
+
+
+def _write_overwrite_diff(target: Path, new_csv_text: str) -> Path:
+    """Stage a unified-diff preview next to where the overwrite would land.
+
+    Filename is ``<target_stem>.diff.txt`` (no timestamp) so the file is
+    self-overwriting on re-runs — same contract as the mass-op preview.
+    Returns the staged path. Caller is expected to surface this so the
+    user can eyeball the diff before re-calling with ``confirm=True``.
+    """
+    old_text = target.read_text(encoding="utf-8")
+    diff_lines = list(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_csv_text.splitlines(keepends=True),
+            fromfile=f"{target.name} (existing)",
+            tofile=f"{target.name} (proposed)",
+            n=_OVERWRITE_DIFF_CONTEXT,
+        )
+    )
+    diff_path = target.with_name(f"{target.stem}.diff.txt")
+    diff_path.parent.mkdir(parents=True, exist_ok=True)
+    if diff_lines:
+        diff_path.write_text("".join(diff_lines), encoding="utf-8")
+    else:
+        # Same bytes on both sides — surface that explicitly so the
+        # reviewer does not stare at an empty file wondering whether the
+        # diff failed.
+        diff_path.write_text(
+            f"(no textual difference between {target.name} and the "
+            "proposed overwrite — the file would be rewritten with "
+            "identical contents)\n",
+            encoding="utf-8",
+        )
+    return diff_path
+
+
 # -- workflow entrypoint ------------------------------------------------------
 
 
@@ -216,6 +280,7 @@ def extract_invoices_to_table(
     *,
     run_extractor: bool = True,
     confirm: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Export every invoice in ``workspace_id`` as a CSV row.
 
@@ -236,6 +301,20 @@ def extract_invoices_to_table(
     the preview to the user and re-run with ``confirm=True``. Pass
     ``True`` to skip the preview gate and write the full export
     directly.
+
+    ``overwrite=False`` (default) keeps the timestamp-suffix contract —
+    every call lands at a fresh ``<stem>-YYYYMMDD-HHMMSS<suffix>`` path
+    so previous exports survive. ``overwrite=True`` opts into the bare
+    ``output_path`` (no timestamp). If that path is empty the file is
+    written directly; if it already exists, a unified diff between the
+    existing file and the proposed bytes is staged as
+    ``<stem>.diff.txt`` and the call returns a
+    ``confirmation_required`` shape backed by the
+    ``confirmable_overwrite`` safety op. Re-call with both
+    ``overwrite=True`` and ``confirm=True`` to actually replace the
+    file. Workspace boundary / read-only escalations still refuse the
+    overwrite — ``confirm=True`` only crosses the soft (caller-consent)
+    gate, never the hard policy rules.
     """
     engine = get_engine()
     ws = engine.workspaces.get(workspace_id)
@@ -244,14 +323,17 @@ def extract_invoices_to_table(
 
     workspace_root = Path(ws.root_path).resolve()
     target = _resolve_output_path(workspace_root, output_path)
-    timestamped = _timestamped(target)
+    # ``write_path`` is where the bytes actually land. Default contract
+    # appends a timestamp suffix so re-runs never destroy a prior
+    # export; ``overwrite=True`` opts into the bare path explicitly.
+    write_path = target if overwrite else _timestamped(target)
 
     # Safety gate. The classifier already encodes the two rules we care
     # about: read-only workspaces refuse writes, and targets outside the
     # workspace root escalate to HIGH risk. The refusal shape is owned
     # by ``safety.pretool`` so every write workflow refuses the same way.
     gate = _pretool_intercept(
-        "export_csv", targets=[str(timestamped)], workspace=ws
+        "export_csv", targets=[str(write_path)], workspace=ws
     )
     if gate.refusal is not None:
         return gate.refusal
@@ -312,7 +394,7 @@ def extract_invoices_to_table(
     if rows:
         mass_gate = _pretool_intercept(
             "bulk_modify",
-            targets=[str(timestamped)],
+            targets=[str(write_path)],
             workspace=ws,
             row_count=len(rows),
             confirm=confirm,
@@ -332,14 +414,49 @@ def extract_invoices_to_table(
                 "skipped": skipped,
                 "columns": list(COLUMNS),
                 "ran_extractor": bool(run_extractor),
+                "overwrite_requested": bool(overwrite),
+            }
+
+    # Overwrite gate. Only fires when the caller explicitly asked for
+    # overwrite=True AND the bare target already exists — those are the
+    # two conditions that make this write destructive. ``confirmable_
+    # overwrite`` is a separate safety op (not in HIGH_OPS) so the soft
+    # confirmation path is reachable; outside-workspace / read-only
+    # still escalate to HIGH and refuse uniformly. Without overwrite
+    # the write_path carries a timestamp suffix and is by construction
+    # a new file, so this gate is a no-op for the default path.
+    if overwrite and write_path.exists():
+        new_csv_text = _rows_to_csv_text(rows)
+        ow_gate = _pretool_intercept(
+            "confirmable_overwrite",
+            targets=[str(write_path)],
+            workspace=ws,
+            confirm=confirm,
+        )
+        if ow_gate.refusal is not None:
+            return ow_gate.refusal
+        if ow_gate.confirmation is not None:
+            diff_path = _write_overwrite_diff(write_path, new_csv_text)
+            return {
+                **ow_gate.confirmation,
+                "workspace_id": workspace_id,
+                "diff_path": str(diff_path),
+                "output_path": None,
+                "row_count": len(rows),
+                "candidate_count": len(candidates),
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+                "columns": list(COLUMNS),
+                "ran_extractor": bool(run_extractor),
+                "overwrite_requested": True,
             }
 
     # Write the CSV — header + one row per invoice. Always create parent
     # dirs because the workspace may have been added before the user
     # created a drafts/ subfolder; this avoids forcing them to mkdir
     # manually before their first export.
-    timestamped.parent.mkdir(parents=True, exist_ok=True)
-    with timestamped.open("w", newline="", encoding="utf-8") as fh:
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    with write_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(COLUMNS))
         writer.writeheader()
         for row in rows:
@@ -352,7 +469,7 @@ def extract_invoices_to_table(
 
     return {
         "workspace_id": workspace_id,
-        "output_path": str(timestamped),
+        "output_path": str(write_path),
         "row_count": len(rows),
         "candidate_count": len(candidates),
         "skipped_count": len(skipped),
@@ -363,6 +480,7 @@ def extract_invoices_to_table(
         "risk": risk.model_dump(mode="json"),
         "ran_extractor": bool(run_extractor),
         "confirmed": bool(confirm),
+        "overwrite_requested": bool(overwrite),
     }
 
 

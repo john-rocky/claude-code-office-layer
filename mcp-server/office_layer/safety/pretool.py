@@ -88,21 +88,31 @@ def build_confirmation(
 
     Mirrors :func:`build_refusal` in shape (top-level ``risk`` key + a
     human-readable ``reason``) so callers can render either uniformly.
-    Adds ``row_count`` / ``threshold`` for the bulk_modify case and a
-    ``how_to_proceed`` hint pointing at the ``confirm`` arg / CLI flag.
+    Adds ``row_count`` / ``threshold`` for the bulk_modify case (and
+    surfaces a destructive-overwrite phrasing for
+    ``confirmable_overwrite``) plus a ``how_to_proceed`` hint pointing
+    at the ``confirm`` arg / CLI flag.
     """
-    if row_count is not None:
+    if risk.operation == "confirmable_overwrite":
+        target = risk.targets[0] if risk.targets else "target"
+        reason = (
+            f"confirmable_overwrite would replace existing file '{target}'"
+        )
+        threshold: int | None = None
+    elif row_count is not None:
         reason = (
             f"{risk.operation} of {row_count} rows exceeds the "
             f"{BULK_MODIFY_THRESHOLD}-row safety threshold"
         )
+        threshold = BULK_MODIFY_THRESHOLD
     else:
         reason = f"operation '{risk.operation}' requires explicit confirmation"
+        threshold = BULK_MODIFY_THRESHOLD
     return {
         "confirmation_required": True,
         "reason": reason,
         "row_count": row_count,
-        "threshold": BULK_MODIFY_THRESHOLD,
+        "threshold": threshold,
         "how_to_proceed": (
             "review the staged preview, then re-run with confirm=true (MCP) "
             "or --confirm (CLI)"

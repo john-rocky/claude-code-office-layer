@@ -640,3 +640,242 @@ def test_mass_op_under_threshold_does_not_set_confirmed_when_default(isolated_en
     assert out["confirmed"] is False
     assert out["row_count"] == 3
     assert out["output_path"] is not None
+
+
+# -- overwrite gate -----------------------------------------------------------
+
+
+def test_overwrite_default_false_keeps_timestamp_contract(isolated_engine, tmp_path):
+    """The legacy timestamp-suffix path must stay intact for callers
+    that do not opt into overwrite. Belt-and-suspenders pin on the
+    "always create a new artifact" contract from ROADMAP #238-241."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    out = extract_invoices_to_table(ws.id, "drafts/invoices.csv")
+    written = Path(out["output_path"])
+    # Timestamp suffix present → stem includes the dash + digits, NOT
+    # the bare "invoices" target.
+    assert written.name != "invoices.csv"
+    assert written.stem.startswith("invoices-")
+
+
+def test_overwrite_with_no_existing_file_writes_bare_path(isolated_engine, tmp_path):
+    """``overwrite=True`` opts into the bare path (no timestamp). When
+    the bare path is empty there is nothing destructive happening so we
+    just write — the confirmable_overwrite gate must NOT fire."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    out = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", overwrite=True
+    )
+    assert out.get("confirmation_required") is None or not out["confirmation_required"]
+    written = Path(out["output_path"])
+    # Bare path — no timestamp suffix.
+    assert written.name == "invoices.csv"
+    assert written.exists()
+    # And the diff staging file was NOT created (nothing to diff against).
+    assert not (tmp_path / "drafts" / "invoices.diff.txt").exists()
+
+
+def test_overwrite_existing_file_without_confirm_stages_diff(
+    isolated_engine, tmp_path
+):
+    """The destructive path: overwrite=True + existing file + confirm=False
+    must stage a unified diff and refuse to write the new CSV."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    # Pre-stage an existing file at the bare target so overwrite has
+    # something to diff against. Content is deliberately different from
+    # what the export would produce so the diff is non-empty.
+    drafts = tmp_path / "drafts"
+    drafts.mkdir(parents=True)
+    existing = drafts / "invoices.csv"
+    existing.write_text("old content unrelated to invoices\n", encoding="utf-8")
+    existing_bytes_before = existing.read_bytes()
+
+    out = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", overwrite=True
+    )
+    assert out["confirmation_required"] is True
+    assert "confirmable_overwrite" in out["reason"]
+    assert out["output_path"] is None
+    diff_path = Path(out["diff_path"])
+    assert diff_path.exists()
+    assert diff_path.name == "invoices.diff.txt"
+    diff_text = diff_path.read_text(encoding="utf-8")
+    # Unified-diff markers present + the existing line is part of the
+    # removed side.
+    assert "@@" in diff_text
+    assert "old content unrelated" in diff_text
+    # Existing file untouched.
+    assert existing.read_bytes() == existing_bytes_before
+    assert out["overwrite_requested"] is True
+
+
+def test_overwrite_existing_file_with_confirm_replaces(
+    isolated_engine, tmp_path
+):
+    """overwrite=True + confirm=True actually replaces the file at the
+    bare path (no timestamp)."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    drafts = tmp_path / "drafts"
+    drafts.mkdir(parents=True)
+    existing = drafts / "invoices.csv"
+    existing.write_text("stale\n", encoding="utf-8")
+
+    out = extract_invoices_to_table(
+        ws.id,
+        "drafts/invoices.csv",
+        overwrite=True,
+        confirm=True,
+    )
+    assert not out.get("confirmation_required")
+    written = Path(out["output_path"])
+    assert written == existing
+    # The CSV header line replaces the stale content.
+    assert written.read_text(encoding="utf-8").startswith("invoice_number,")
+    assert out["confirmed"] is True
+    assert out["overwrite_requested"] is True
+
+
+def test_overwrite_diff_overwrites_on_rerun(isolated_engine, tmp_path):
+    """The diff file is intentionally NOT timestamped — re-running the
+    same overwrite-without-confirm call must overwrite its previous
+    diff instead of leaving a pile of ``.diff-YYYY...txt`` siblings.
+    Mirrors the mass-op preview contract."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    drafts = tmp_path / "drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "invoices.csv").write_text("v1\n", encoding="utf-8")
+    out1 = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", overwrite=True
+    )
+    out2 = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", overwrite=True
+    )
+    assert out1["diff_path"] == out2["diff_path"]
+    diff_like = [p for p in drafts.iterdir() if ".diff" in p.name]
+    assert diff_like == [Path(out1["diff_path"])]
+
+
+def test_overwrite_outside_workspace_refuses_even_with_confirm(
+    isolated_engine, tmp_path
+):
+    """HIGH-refuse for outside-workspace must survive even the
+    overwrite + confirm combo. ``confirm=True`` is a soft-gate
+    acknowledgement, not a workspace-boundary override."""
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir()
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(ws_root), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    outside = tmp_path / "elsewhere" / "invoices.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("preexisting\n", encoding="utf-8")
+    out = extract_invoices_to_table(
+        ws.id, str(outside), overwrite=True, confirm=True
+    )
+    assert "error" in out
+    # And the outside file is NOT modified.
+    assert outside.read_text(encoding="utf-8") == "preexisting\n"
+
+
+def test_overwrite_read_only_workspace_refuses_before_diff(
+    isolated_engine, tmp_path
+):
+    """Read-only workspace refusal must precede any diff staging — the
+    workspace policy is a hard rule."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.READ_ONLY
+    )
+    _seed_doc(
+        isolated_engine.storage, ws,
+        name="inv.md", rel_path="invoices/inv.md",
+        text=_INVOICE_MD_JP,
+    )
+    drafts = tmp_path / "drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "invoices.csv").write_text("v1\n", encoding="utf-8")
+    out = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", overwrite=True
+    )
+    assert "error" in out
+    assert not (drafts / "invoices.diff.txt").exists()
+
+
+def test_overwrite_combines_with_mass_op_gate(isolated_engine, tmp_path):
+    """When both gates would fire (row_count > threshold AND existing
+    file at the bare path), the mass-op gate must fire first — it can
+    short-circuit the work before we even need to compute a diff. The
+    overwrite gate is only reachable after the caller has acknowledged
+    the row count with ``confirm=True``."""
+    ws = isolated_engine.workspaces.add(
+        name="ws", root_path=str(tmp_path), policy=WorkspacePolicy.DRAFT_WRITE
+    )
+    _seed_invoice(isolated_engine.storage, ws, n=6)
+    drafts = tmp_path / "drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "invoices.csv").write_text("v1\n", encoding="utf-8")
+
+    # First call: mass-op gate fires (preview, not diff).
+    out1 = extract_invoices_to_table(
+        ws.id, "drafts/invoices.csv", run_extractor=False, overwrite=True
+    )
+    assert out1["confirmation_required"] is True
+    assert "preview_path" in out1
+    assert "diff_path" not in out1
+    assert "exceeds" in out1["reason"]
+
+    # Second call (mass-op acknowledged): overwrite gate fires.
+    out2 = extract_invoices_to_table(
+        ws.id,
+        "drafts/invoices.csv",
+        run_extractor=False,
+        overwrite=True,
+        confirm=True,
+    )
+    # With confirm=True the mass-op acknowledges AND the overwrite
+    # gate's confirmation_required path is also crossed (the workflow
+    # honours one confirm flag for both soft gates by design — the
+    # caller's "yes, write it" applies to whichever gate fires last).
+    assert out2.get("confirmation_required") is None or not out2["confirmation_required"]
+    written = Path(out2["output_path"])
+    assert written.name == "invoices.csv"
+    assert written.read_text(encoding="utf-8").startswith("invoice_number,")
